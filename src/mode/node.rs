@@ -33,9 +33,27 @@ pub(crate) struct Args {
     )]
     control: String,
 
+    /// The locally-known address of the node server.
+    /// This can be set blank, unless binding publicly, in which case
+    /// `0.0.0.0:{port}` or `[::]:{port}` may be preferred.
+    /// 
+    /// If not provided, the node will bind to a random port on localhost.
     #[arg(long, value_name = "NODE_SOCKET")]
     bind_socket: Option<SocketAddr>,
 
+    /// The address of the node server as reachable from the control server (or other nodes).
+    /// This can be set blank, unless binding publicly, in which case
+    /// `{some_public_ip}:{port}` may be preferred.
+    /// 
+    /// If this is not set, the, generally, only `localhost` type connections
+    /// will work from other nodes, as the, otherwise, the nodes have no way of knowing the 
+    /// "public" address of the node (may be private, but needs to be reachable).
+    /// 
+    /// If not provided, this value will fall back to the value of `NODE_SOCKET`.
+    #[arg(long, value_name = "REACHABLE_SOCKET")]
+    reachable_socket: Option<SocketAddr>,
+
+    /// Path to a WASM module to run on startup.
     #[arg(long, value_name = "WASM_MODULE")]
     wasm: Option<PathBuf>,
 
@@ -57,6 +75,10 @@ pub(crate) async fn start(args: Args) -> Result<()> {
     let socket = args
         .bind_socket
         .or_else(get_available_localhost)
+        .ok_or_else(|| anyhow!("No available localhost UDP port"))?;
+    let reachable_socket = args
+        .reachable_socket
+        .or(Some(socket))
         .ok_or_else(|| anyhow!("No available localhost UDP port"))?;
     let http_client = reqwest::Client::new();
 
@@ -90,7 +112,7 @@ pub(crate) async fn start(args: Args) -> Result<()> {
     };
 
     let control_client =
-        control::Client::new(http_client.clone(), reg.clone(), socket, node_attributes).await?;
+        control::Client::new(http_client.clone(), reg.clone(), reachable_socket, node_attributes).await?;
 
     let node_id = control_client.node_id();
 
