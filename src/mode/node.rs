@@ -25,7 +25,7 @@ use crate::mode::common::{run_wasm, RunWasm};
 
 #[derive(Parser, Debug)]
 pub(crate) struct Args {
-    /// Control server register URL
+    /// Control server register URL.
     #[arg(
         index = 1,
         value_name = "CONTROL_URL",
@@ -57,7 +57,7 @@ pub(crate) struct Args {
     #[arg(long, value_name = "WASM_MODULE")]
     wasm: Option<PathBuf>,
 
-    /// Define key=value variable to store as node information
+    /// Define key=value variable to store as node information.
     #[arg(long, value_parser = parse_key_val, action = clap::ArgAction::Append)]
     tag: Vec<(String, String)>,
 
