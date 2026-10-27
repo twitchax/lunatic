@@ -12,7 +12,7 @@ use tokio::{
 };
 use wasmtime::{Caller, Linker};
 
-use lunatic_common_api::{get_memory, IntoTrap};
+use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use lunatic_error_api::ErrorCtx;
 
 use crate::dns::DnsIterator;
@@ -22,40 +22,40 @@ use crate::{socket_address, NetworkingCtx, TcpConnection};
 pub fn register<T: NetworkingCtx + ErrorCtx + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> Result<()> {
-    linker.func_wrap6_async("lunatic::networking", "tcp_bind", tcp_bind)?;
-    linker.func_wrap(
+    linker.func_wrap_async_anyhow("lunatic::networking", "tcp_bind", tcp_bind)?;
+    linker.func_wrap_anyhow(
         "lunatic::networking",
         "drop_tcp_listener",
         drop_tcp_listener,
     )?;
-    linker.func_wrap("lunatic::networking", "tcp_local_addr", tcp_local_addr)?;
-    linker.func_wrap3_async("lunatic::networking", "tcp_accept", tcp_accept)?;
-    linker.func_wrap7_async("lunatic::networking", "tcp_connect", tcp_connect)?;
-    linker.func_wrap2_async("lunatic::networking", "tcp_peer_addr", tcp_peer_addr)?;
-    linker.func_wrap("lunatic::networking", "drop_tcp_stream", drop_tcp_stream)?;
-    linker.func_wrap("lunatic::networking", "clone_tcp_stream", clone_tcp_stream)?;
-    linker.func_wrap4_async(
+    linker.func_wrap_anyhow("lunatic::networking", "tcp_local_addr", tcp_local_addr)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tcp_accept", tcp_accept)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tcp_connect", tcp_connect)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tcp_peer_addr", tcp_peer_addr)?;
+    linker.func_wrap_anyhow("lunatic::networking", "drop_tcp_stream", drop_tcp_stream)?;
+    linker.func_wrap_anyhow("lunatic::networking", "clone_tcp_stream", clone_tcp_stream)?;
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "tcp_write_vectored",
         tcp_write_vectored,
     )?;
-    linker.func_wrap4_async("lunatic::networking", "tcp_peek", tcp_peek)?;
-    linker.func_wrap4_async("lunatic::networking", "tcp_read", tcp_read)?;
-    linker.func_wrap2_async("lunatic::networking", "set_read_timeout", set_read_timeout)?;
-    linker.func_wrap2_async(
+    linker.func_wrap_async_anyhow("lunatic::networking", "tcp_peek", tcp_peek)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tcp_read", tcp_read)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "set_read_timeout", set_read_timeout)?;
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "set_write_timeout",
         set_write_timeout,
     )?;
-    linker.func_wrap2_async("lunatic::networking", "set_peek_timeout", set_peek_timeout)?;
-    linker.func_wrap1_async("lunatic::networking", "get_read_timeout", get_read_timeout)?;
-    linker.func_wrap1_async(
+    linker.func_wrap_async_anyhow("lunatic::networking", "set_peek_timeout", set_peek_timeout)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "get_read_timeout", get_read_timeout)?;
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "get_write_timeout",
         get_write_timeout,
     )?;
-    linker.func_wrap1_async("lunatic::networking", "get_peek_timeout", get_peek_timeout)?;
-    linker.func_wrap2_async("lunatic::networking", "tcp_flush", tcp_flush)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "get_peek_timeout", get_peek_timeout)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tcp_flush", tcp_flush)?;
     Ok(())
 }
 

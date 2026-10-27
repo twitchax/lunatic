@@ -64,7 +64,7 @@ struct Args {
 
 pub(crate) async fn test(augmented_args: Option<Vec<String>>) -> Result<()> {
     // Set logger level to "error" to avoid printing process failures warnings during tests.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error")).init();
+    super::common::init_logger("error");
     // Measure test duration
     let now = Instant::now();
 

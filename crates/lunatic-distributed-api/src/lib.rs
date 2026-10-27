@@ -2,7 +2,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
 use asn1_rs::ToDer;
-use lunatic_common_api::{get_memory, write_to_guest_vec, IntoTrap};
+use lunatic_common_api::{get_memory, write_to_guest_vec, IntoTrap, LinkerExt};
 use lunatic_distributed::{
     distributed::{
         self,
@@ -29,33 +29,33 @@ where
     for<'a> &'a T: Send,
 {
     linker.func_wrap("lunatic::distributed", "nodes_count", nodes_count)?;
-    linker.func_wrap("lunatic::distributed", "get_nodes", get_nodes)?;
+    linker.func_wrap_anyhow("lunatic::distributed", "get_nodes", get_nodes)?;
     linker.func_wrap("lunatic::distributed", "node_id", node_id)?;
     linker.func_wrap("lunatic::distributed", "module_id", module_id)?;
-    linker.func_wrap8_async("lunatic::distributed", "spawn", spawn)?;
-    linker.func_wrap2_async("lunatic::distributed", "send", send)?;
-    linker.func_wrap4_async(
+    linker.func_wrap_async_anyhow("lunatic::distributed", "spawn", spawn)?;
+    linker.func_wrap_async_anyhow("lunatic::distributed", "send", send)?;
+    linker.func_wrap_async_anyhow(
         "lunatic::distributed",
         "send_receive_skip_search",
         send_receive_skip_search,
     )?;
-    linker.func_wrap5_async(
+    linker.func_wrap_async_anyhow(
         "lunatic::distributed",
         "exec_lookup_nodes",
         exec_lookup_nodes,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::distributed",
         "copy_lookup_nodes_results",
         copy_lookup_nodes_results,
     )?;
-    linker.func_wrap1_async("lunatic::distributed", "test_root_cert", test_root_cert)?;
-    linker.func_wrap5_async(
+    linker.func_wrap_async_anyhow("lunatic::distributed", "test_root_cert", test_root_cert)?;
+    linker.func_wrap_async_anyhow(
         "lunatic::distributed",
         "default_server_certificates",
         default_server_certificates,
     )?;
-    linker.func_wrap7_async("lunatic::distributed", "sign_node", sign_node)?;
+    linker.func_wrap_async_anyhow("lunatic::distributed", "sign_node", sign_node)?;
     Ok(())
 }
 

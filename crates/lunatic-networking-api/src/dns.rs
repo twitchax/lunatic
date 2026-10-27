@@ -7,7 +7,7 @@ use anyhow::Result;
 use tokio::time::timeout;
 use wasmtime::{Caller, Linker};
 
-use lunatic_common_api::{get_memory, IntoTrap};
+use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use lunatic_error_api::ErrorCtx;
 
 use crate::NetworkingCtx;
@@ -34,13 +34,13 @@ impl Iterator for DnsIterator {
 pub fn register<T: NetworkingCtx + ErrorCtx + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> Result<()> {
-    linker.func_wrap4_async("lunatic::networking", "resolve", resolve)?;
-    linker.func_wrap(
+    linker.func_wrap_async_anyhow("lunatic::networking", "resolve", resolve)?;
+    linker.func_wrap_anyhow(
         "lunatic::networking",
         "drop_dns_iterator",
         drop_dns_iterator,
     )?;
-    linker.func_wrap("lunatic::networking", "resolve_next", resolve_next)?;
+    linker.func_wrap_anyhow("lunatic::networking", "resolve_next", resolve_next)?;
     Ok(())
 }
 

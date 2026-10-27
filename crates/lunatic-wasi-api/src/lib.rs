@@ -1,28 +1,86 @@
+use std::sync::{Mutex, PoisonError};
+
 use anyhow::Result;
-use lunatic_common_api::{get_memory, IntoTrap};
+use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use lunatic_process::state::ProcessState;
 use lunatic_stdout_capture::StdoutCapture;
 use wasmtime::{Caller, Linker};
-use wasmtime_wasi::{ambient_authority, Dir, WasiCtx, WasiCtxBuilder};
+use wasmtime_wasi::{p1::WasiP1Ctx, FsPerms, WasiCtxBuilder};
 
-/// Create a `WasiCtx` from configuration settings.
+/// Create a `LunaticWasi` context from configuration settings.
 pub fn build_wasi(
     args: Option<&Vec<String>>,
     envs: Option<&Vec<(String, String)>>,
     dirs: &[(String, String)],
-) -> Result<WasiCtx> {
-    let mut wasi = WasiCtxBuilder::new().inherit_stdio();
+) -> Result<LunaticWasi> {
+    let mut wasi = WasiCtxBuilder::new();
+    wasi.inherit_stdio();
     if let Some(envs) = envs {
-        wasi = wasi.envs(envs)?;
+        wasi.envs(envs);
     }
     if let Some(args) = args {
-        wasi = wasi.args(args)?;
+        wasi.args(args);
     }
     for (preopen_dir_path, resolved_path) in dirs {
-        let preopen_dir = Dir::open_ambient_dir(resolved_path, ambient_authority())?;
-        wasi = wasi.preopened_dir(preopen_dir, preopen_dir_path)?;
+        wasi.preopened_dir(resolved_path, preopen_dir_path, FsPerms::ReadWrite)?;
     }
-    Ok(wasi.build())
+    Ok(LunaticWasi(Mutex::new(WasiState::Configuring(Box::new(
+        wasi,
+    )))))
+}
+
+/// The WASI context of a process.
+///
+/// wasmtime-wasi can't redirect stdio once a context is built, but lunatic redirects a process'
+/// stdout and stderr after creating its state (e.g. to capture the output of tests). The context
+/// is therefore built lazily on first use, and stdio can be redirected until then.
+//
+// The process state must be `Sync`, but wasmtime-wasi's contexts aren't. They are only accessed
+// through `&mut self`, so the `Mutex` is never locked (see `Mutex::get_mut`); it only makes the
+// type `Sync`.
+pub struct LunaticWasi(Mutex<WasiState>);
+
+enum WasiState {
+    Configuring(Box<WasiCtxBuilder>),
+    Built(Box<WasiP1Ctx>),
+}
+
+impl LunaticWasi {
+    /// Redirect the stdout stream. Has no effect once the process has used WASI.
+    pub fn set_stdout(&mut self, stdout: StdoutCapture) {
+        match self.state() {
+            WasiState::Configuring(builder) => {
+                builder.stdout(stdout);
+            }
+            WasiState::Built(_) => log::error!("stdout can't be redirected after WASI was used"),
+        }
+    }
+
+    /// Redirect the stderr stream. Has no effect once the process has used WASI.
+    pub fn set_stderr(&mut self, stderr: StdoutCapture) {
+        match self.state() {
+            WasiState::Configuring(builder) => {
+                builder.stderr(stderr);
+            }
+            WasiState::Built(_) => log::error!("stderr can't be redirected after WASI was used"),
+        }
+    }
+
+    /// Returns the WASI context, building it on first use.
+    pub fn ctx(&mut self) -> &mut WasiP1Ctx {
+        let state = self.state();
+        if let WasiState::Configuring(builder) = state {
+            *state = WasiState::Built(Box::new(builder.build_p1()));
+        }
+        match state {
+            WasiState::Built(ctx) => ctx,
+            WasiState::Configuring(_) => unreachable!("the context was built above"),
+        }
+    }
+
+    fn state(&mut self) -> &mut WasiState {
+        self.0.get_mut().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 pub trait LunaticWasiConfigCtx {
@@ -32,8 +90,7 @@ pub trait LunaticWasiConfigCtx {
 }
 
 pub trait LunaticWasiCtx {
-    fn wasi(&self) -> &WasiCtx;
-    fn wasi_mut(&mut self) -> &mut WasiCtx;
+    fn wasi_mut(&mut self) -> &mut WasiP1Ctx;
     fn set_stdout(&mut self, stdout: StdoutCapture);
     fn get_stdout(&self) -> Option<&StdoutCapture>;
     fn set_stderr(&mut self, stderr: StdoutCapture);
@@ -47,23 +104,20 @@ where
     T::Config: LunaticWasiConfigCtx,
 {
     // Register all wasi host functions
-    wasmtime_wasi::sync::snapshots::preview_1::add_wasi_snapshot_preview1_to_linker(
-        linker,
-        |ctx| ctx.wasi_mut(),
-    )?;
+    wasmtime_wasi::p1::add_to_linker_async(linker, |ctx| ctx.wasi_mut())?;
 
     // Register host functions to configure wasi
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::wasi",
         "config_add_environment_variable",
         add_environment_variable,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::wasi",
         "config_add_command_line_argument",
         add_command_line_argument,
     )?;
-    linker.func_wrap("lunatic::wasi", "config_preopen_dir", preopen_dir)?;
+    linker.func_wrap_anyhow("lunatic::wasi", "config_preopen_dir", preopen_dir)?;
 
     Ok(())
 }

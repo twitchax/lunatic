@@ -1,6 +1,6 @@
 use anyhow::Result;
 use hash_map_id::HashMapId;
-use lunatic_common_api::{get_memory, write_to_guest_vec, IntoTrap};
+use lunatic_common_api::{get_memory, write_to_guest_vec, IntoTrap, LinkerExt};
 use lunatic_error_api::ErrorCtx;
 use lunatic_process::state::ProcessState;
 use lunatic_process_api::ProcessConfigCtx;
@@ -42,20 +42,20 @@ pub fn register<T: SQLiteCtx + ProcessState + Send + ErrorCtx + ResourceLimiter 
 where
     T::Config: lunatic_process_api::ProcessConfigCtx,
 {
-    linker.func_wrap("lunatic::sqlite", "open", open)?;
-    linker.func_wrap("lunatic::sqlite", "query_prepare", query_prepare)?;
-    linker.func_wrap("lunatic::sqlite", "execute", execute)?;
-    linker.func_wrap("lunatic::sqlite", "bind_value", bind_value)?;
-    linker.func_wrap("lunatic::sqlite", "sqlite3_changes", sqlite3_changes)?;
-    linker.func_wrap("lunatic::sqlite", "statement_reset", statement_reset)?;
-    linker.func_wrap2_async("lunatic::sqlite", "last_error", last_error)?;
-    linker.func_wrap("lunatic::sqlite", "sqlite3_finalize", sqlite3_finalize)?;
-    linker.func_wrap("lunatic::sqlite", "sqlite3_step", sqlite3_step)?;
-    linker.func_wrap3_async("lunatic::sqlite", "read_column", read_column)?;
-    linker.func_wrap2_async("lunatic::sqlite", "column_names", column_names)?;
-    linker.func_wrap2_async("lunatic::sqlite", "read_row", read_row)?;
-    linker.func_wrap("lunatic::sqlite", "column_count", column_count)?;
-    linker.func_wrap3_async("lunatic::sqlite", "column_name", column_name)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "open", open)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "query_prepare", query_prepare)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "execute", execute)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "bind_value", bind_value)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "sqlite3_changes", sqlite3_changes)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "statement_reset", statement_reset)?;
+    linker.func_wrap_async_anyhow("lunatic::sqlite", "last_error", last_error)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "sqlite3_finalize", sqlite3_finalize)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "sqlite3_step", sqlite3_step)?;
+    linker.func_wrap_async_anyhow("lunatic::sqlite", "read_column", read_column)?;
+    linker.func_wrap_async_anyhow("lunatic::sqlite", "column_names", column_names)?;
+    linker.func_wrap_async_anyhow("lunatic::sqlite", "read_row", read_row)?;
+    linker.func_wrap_anyhow("lunatic::sqlite", "column_count", column_count)?;
+    linker.func_wrap_async_anyhow("lunatic::sqlite", "column_name", column_name)?;
     Ok(())
 }
 

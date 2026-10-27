@@ -87,7 +87,7 @@ impl Into<wasmtime::Val> for Val {
         match self {
             Val::I32(v) => wasmtime::Val::I32(v),
             Val::I64(v) => wasmtime::Val::I64(v),
-            Val::V128(v) => wasmtime::Val::V128(v),
+            Val::V128(v) => wasmtime::Val::V128(v.into()),
         }
     }
 }

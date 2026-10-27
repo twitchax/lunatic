@@ -1,7 +1,7 @@
 use wasmtime::Linker;
 
 /// Links the `version` APIs.
-pub fn register<T>(linker: &mut Linker<T>) -> anyhow::Result<()> {
+pub fn register<T: 'static>(linker: &mut Linker<T>) -> anyhow::Result<()> {
     linker.func_wrap("lunatic::version", "major", major)?;
     linker.func_wrap("lunatic::version", "minor", minor)?;
     linker.func_wrap("lunatic::version", "patch", patch)?;

@@ -1,16 +1,16 @@
 use anyhow::Result;
-use lunatic_common_api::{get_memory, IntoTrap};
+use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use metrics::{counter, decrement_gauge, gauge, histogram, increment_counter, increment_gauge};
 use wasmtime::{Caller, Linker};
 
 /// Links the [Metrics](https://crates.io/crates/metrics) APIs
 pub fn register<T: 'static>(linker: &mut Linker<T>) -> anyhow::Result<()> {
-    linker.func_wrap("lunatic::metrics", "counter", counter)?;
-    linker.func_wrap("lunatic::metrics", "increment_counter", increment_counter)?;
-    linker.func_wrap("lunatic::metrics", "gauge", gauge)?;
-    linker.func_wrap("lunatic::metrics", "increment_gauge", increment_gauge)?;
-    linker.func_wrap("lunatic::metrics", "decrement_gauge", decrement_gauge)?;
-    linker.func_wrap("lunatic::metrics", "histogram", histogram)?;
+    linker.func_wrap_anyhow("lunatic::metrics", "counter", counter)?;
+    linker.func_wrap_anyhow("lunatic::metrics", "increment_counter", increment_counter)?;
+    linker.func_wrap_anyhow("lunatic::metrics", "gauge", gauge)?;
+    linker.func_wrap_anyhow("lunatic::metrics", "increment_gauge", increment_gauge)?;
+    linker.func_wrap_anyhow("lunatic::metrics", "decrement_gauge", decrement_gauge)?;
+    linker.func_wrap_anyhow("lunatic::metrics", "histogram", histogram)?;
     Ok(())
 }
 

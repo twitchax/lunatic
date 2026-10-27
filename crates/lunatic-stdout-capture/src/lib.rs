@@ -1,14 +1,20 @@
 use std::{
-    any::Any,
     fmt::{Display, Formatter},
-    io::{stdout, Cursor, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write},
+    io::{self, stdout, Cursor, Write},
+    pin::Pin,
     sync::{Arc, Mutex, RwLock},
+    task::{Context, Poll},
 };
 
-use wasi_common::{
-    file::{Advice, FdFlags, FileType, Filestat},
-    Error, ErrorExt, SystemTimeSpec, WasiFile,
+use bytes::Bytes;
+use tokio::io::AsyncWrite;
+use wasmtime_wasi::{
+    cli::{IsTerminal, StdoutStream},
+    p2::{OutputStream, Pollable, StreamError, StreamResult},
 };
+
+// The number of bytes a single write may carry, matching wasmtime-wasi's own stdio streams.
+const WRITE_BUDGET: usize = 64 * 1024;
 
 // This signature looks scary, but it just means that the vector holding all output streams
 // is rarely extended and often accessed (`RwLock`). The `Mutex` is necessary to allow
@@ -106,106 +112,70 @@ impl StdoutCapture {
         let mut stream = streams[self.index].lock().unwrap();
         write!(stream, "{content}").unwrap();
     }
-}
 
-#[wiggle::async_trait]
-impl WasiFile for StdoutCapture {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    async fn datasync(&self) -> Result<(), Error> {
-        Ok(())
-    }
-    async fn sync(&self) -> Result<(), Error> {
-        Ok(())
-    }
-    async fn get_filetype(&self) -> Result<FileType, Error> {
-        Ok(FileType::Pipe)
-    }
-    async fn get_fdflags(&self) -> Result<FdFlags, Error> {
-        Ok(FdFlags::APPEND)
-    }
-    async fn set_fdflags(&mut self, _fdflags: FdFlags) -> Result<(), Error> {
-        Err(Error::badf())
-    }
-    async fn get_filestat(&self) -> Result<Filestat, Error> {
-        Ok(Filestat {
-            device_id: 0,
-            inode: 0,
-            filetype: self.get_filetype().await?,
-            nlink: 0,
-            size: 0, // XXX no way to get a size out of a Write :(
-            atim: None,
-            mtim: None,
-            ctim: None,
-        })
-    }
-    async fn set_filestat_size(&self, _size: u64) -> Result<(), Error> {
-        Err(Error::badf())
-    }
-    async fn advise(&self, _offset: u64, _len: u64, _advice: Advice) -> Result<(), Error> {
-        Err(Error::badf())
-    }
-    async fn allocate(&self, _offset: u64, _len: u64) -> Result<(), Error> {
-        Err(Error::badf())
-    }
-    async fn read_vectored<'a>(&self, _bufs: &mut [IoSliceMut<'a>]) -> Result<u64, Error> {
-        Err(Error::badf())
-    }
-    async fn read_vectored_at<'a>(
-        &self,
-        _bufs: &mut [IoSliceMut<'a>],
-        _offset: u64,
-    ) -> Result<u64, Error> {
-        Err(Error::badf())
-    }
-    async fn write_vectored<'a>(&self, bufs: &[IoSlice<'a>]) -> Result<u64, Error> {
+    // Write guest output to the stream, echoing it to stdout if requested.
+    fn write_captured(&self, buf: &[u8]) -> io::Result<()> {
         let streams = RwLock::read(&self.writers).unwrap();
         let mut stream = streams[self.index].lock().unwrap();
-        let n = stream.write_vectored(bufs)?;
-        // Echo the captured part to stdout
+        stream.write_all(buf)?;
         if self.echo {
-            stream.seek(SeekFrom::End(-(n as i64)))?;
-            let mut echo = vec![0; n];
-            stream.read_exact(&mut echo)?;
-            stdout().write_all(&echo)?;
+            stdout().write_all(buf)?;
         }
-        Ok(n.try_into()?)
+        Ok(())
     }
-    async fn write_vectored_at<'a>(
-        &self,
-        _bufs: &[IoSlice<'a>],
-        _offset: u64,
-    ) -> Result<u64, Error> {
-        Err(Error::badf())
-    }
-    async fn seek(&self, _pos: SeekFrom) -> Result<u64, Error> {
-        Err(Error::badf())
-    }
-    async fn peek(&self, _buf: &mut [u8]) -> Result<u64, Error> {
-        Err(Error::badf())
-    }
-    async fn set_times(
-        &self,
-        _atime: Option<SystemTimeSpec>,
-        _mtime: Option<SystemTimeSpec>,
-    ) -> Result<(), Error> {
-        Err(Error::badf())
-    }
-    fn num_ready_bytes(&self) -> Result<u64, Error> {
-        Ok(0)
-    }
-    fn isatty(&self) -> bool {
+}
+
+impl IsTerminal for StdoutCapture {
+    fn is_terminal(&self) -> bool {
         false
     }
-    async fn readable(&self) -> Result<(), Error> {
-        Err(Error::badf())
-    }
-    async fn writable(&self) -> Result<(), Error> {
-        Err(Error::badf())
+}
+
+impl StdoutStream for StdoutCapture {
+    fn p2_stream(&self) -> Box<dyn OutputStream> {
+        Box::new(self.clone())
     }
 
-    async fn sock_accept(&self, _fdflags: FdFlags) -> Result<Box<dyn WasiFile>, Error> {
-        Err(Error::badf())
+    fn async_stream(&self) -> Box<dyn AsyncWrite + Send + Sync> {
+        Box::new(self.clone())
+    }
+}
+
+// Writes are synchronous, so captured output is visible as soon as the guest's write returns.
+impl OutputStream for StdoutCapture {
+    fn write(&mut self, bytes: Bytes) -> StreamResult<()> {
+        self.write_captured(&bytes)
+            .map_err(|e| StreamError::LastOperationFailed(e.into()))
+    }
+
+    fn flush(&mut self) -> StreamResult<()> {
+        Ok(())
+    }
+
+    fn check_write(&mut self) -> StreamResult<usize> {
+        Ok(WRITE_BUDGET)
+    }
+}
+
+#[wasmtime_wasi::async_trait]
+impl Pollable for StdoutCapture {
+    async fn ready(&mut self) {}
+}
+
+impl AsyncWrite for StdoutCapture {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(self.write_captured(buf).map(|()| buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 }

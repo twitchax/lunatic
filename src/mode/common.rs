@@ -28,6 +28,22 @@ pub struct RunWasm {
     pub distributed: Option<DistributedProcessState>,
 }
 
+/// Initializes the logger, using `default_filter` unless `RUST_LOG` is set.
+pub fn init_logger(default_filter: &str) {
+    logger(env_logger::Env::default().default_filter_or(default_filter)).init();
+}
+
+fn logger(env: env_logger::Env) -> env_logger::Builder {
+    let mut builder = env_logger::Builder::new();
+    builder
+        // wasmtime-wasi traces every WASI call at the info level. Keep these quiet unless they are
+        // asked for explicitly in `RUST_LOG`.
+        .filter_module("wasmtime_wasi", log::LevelFilter::Warn)
+        .filter_module("tracing::span", log::LevelFilter::Warn)
+        .parse_env(env);
+    builder
+}
+
 pub async fn run_wasm(args: RunWasm) -> Result<()> {
     let mut config = DefaultProcessConfig::default();
     // Allow initial process to compile modules, create configurations and spawn sub-processes
@@ -116,4 +132,30 @@ pub fn prometheus(http_socket: Option<std::net::SocketAddr>, node_id: Option<u64
         .add_global_label("node_id", node_id.unwrap_or(0).to_string())
         .install()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use log::{Level, Log, Metadata};
+
+    // Whether a logger configured with `filter` logs info messages of `target`.
+    fn logs_info(filter: &str, target: &str) -> bool {
+        let env = env_logger::Env::new()
+            .filter("LUNATIC_UNSET_LOG_FILTER")
+            .default_filter_or(filter);
+        let logger = super::logger(env).build();
+        logger.enabled(
+            &Metadata::builder()
+                .level(Level::Info)
+                .target(target)
+                .build(),
+        )
+    }
+
+    #[test]
+    fn wasi_call_traces_are_only_logged_on_request() {
+        assert!(logs_info("info", "lunatic_process"));
+        assert!(!logs_info("info", "wasmtime_wasi::p1"));
+        assert!(logs_info("info,wasmtime_wasi=info", "wasmtime_wasi::p1"));
+    }
 }

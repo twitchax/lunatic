@@ -24,7 +24,9 @@ pub type SignalReceiver = Arc<Mutex<UnboundedReceiver<Signal>>>;
 /// The `ProcessState` has two main roles:
 /// - It holds onto all vm resources (file descriptors, tcp streams, channels, ...)
 /// - Registers all host functions working on those resources to the `Linker`
-pub trait ProcessState: Sized {
+///
+/// It's the data of a wasmtime `Store`, which must be `'static`.
+pub trait ProcessState: Sized + 'static {
     type Config: ProcessConfig + Default + Send + Sync;
 
     // Create a new `ProcessState` using the parent's state (self) to inherit environment and

@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use hash_map_id::HashMapId;
-use lunatic_common_api::{get_memory, IntoTrap};
+use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use lunatic_distributed::DistributedCtx;
 use lunatic_error_api::ErrorCtx;
 use lunatic_process::{
@@ -92,8 +92,8 @@ where
         "Duration of module compilation"
     );
 
-    linker.func_wrap("lunatic::process", "compile_module", compile_module)?;
-    linker.func_wrap("lunatic::process", "drop_module", drop_module)?;
+    linker.func_wrap_anyhow("lunatic::process", "compile_module", compile_module)?;
+    linker.func_wrap_anyhow("lunatic::process", "drop_module", drop_module)?;
 
     #[cfg(feature = "metrics")]
     metrics::describe_counter!(
@@ -117,70 +117,72 @@ where
     );
 
     linker.func_wrap("lunatic::process", "create_config", create_config)?;
-    linker.func_wrap("lunatic::process", "drop_config", drop_config)?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow("lunatic::process", "drop_config", drop_config)?;
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_set_max_memory",
         config_set_max_memory,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_get_max_memory",
         config_get_max_memory,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_set_max_fuel",
         config_set_max_fuel,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_get_max_fuel",
         config_get_max_fuel,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_can_compile_modules",
         config_can_compile_modules,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_set_can_compile_modules",
         config_set_can_compile_modules,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_can_create_configs",
         config_can_create_configs,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_set_can_create_configs",
         config_set_can_create_configs,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_can_spawn_processes",
         config_can_spawn_processes,
     )?;
-    linker.func_wrap(
+    linker.func_wrap_anyhow(
         "lunatic::process",
         "config_set_can_spawn_processes",
         config_set_can_spawn_processes,
     )?;
 
-    linker.func_wrap8_async("lunatic::process", "spawn", spawn)?;
-    linker.func_wrap11_async("lunatic::process", "get_or_spawn", get_or_spawn)?;
-    linker.func_wrap1_async("lunatic::process", "sleep_ms", sleep_ms)?;
+    linker.func_wrap_async_anyhow("lunatic::process", "spawn", spawn)?;
+    linker.func_wrap_async_anyhow("lunatic::process", "get_or_spawn", get_or_spawn)?;
+    linker.func_wrap_async("lunatic::process", "sleep_ms", |caller, (millis,)| {
+        sleep_ms(caller, millis)
+    })?;
     linker.func_wrap("lunatic::process", "die_when_link_dies", die_when_link_dies)?;
 
     linker.func_wrap("lunatic::process", "process_id", process_id)?;
     linker.func_wrap("lunatic::process", "environment_id", environment_id)?;
-    linker.func_wrap("lunatic::process", "link", link)?;
-    linker.func_wrap("lunatic::process", "unlink", unlink)?;
-    linker.func_wrap("lunatic::process", "monitor", monitor)?;
-    linker.func_wrap("lunatic::process", "stop_monitoring", stop_monitoring)?;
-    linker.func_wrap("lunatic::process", "kill", kill)?;
+    linker.func_wrap_anyhow("lunatic::process", "link", link)?;
+    linker.func_wrap_anyhow("lunatic::process", "unlink", unlink)?;
+    linker.func_wrap_anyhow("lunatic::process", "monitor", monitor)?;
+    linker.func_wrap_anyhow("lunatic::process", "stop_monitoring", stop_monitoring)?;
+    linker.func_wrap_anyhow("lunatic::process", "kill", kill)?;
     linker.func_wrap("lunatic::process", "exists", exists)?;
     Ok(())
 }
@@ -619,7 +621,7 @@ where
                 let result = match chunk[0] {
                     0x7F => Val::I32(value as i32),
                     0x7E => Val::I64(value as i64),
-                    0x7B => Val::V128(value),
+                    0x7B => Val::V128(value.into()),
                     _ => return Err(anyhow!("Unsupported type ID")),
                 };
                 Ok(result)
@@ -819,7 +821,7 @@ where
                     let result = match chunk[0] {
                         0x7F => Val::I32(value as i32),
                         0x7E => Val::I64(value as i64),
-                        0x7B => Val::V128(value),
+                        0x7B => Val::V128(value.into()),
                         _ => return Err(anyhow!("Unsupported type ID")),
                     };
                     Ok(result)

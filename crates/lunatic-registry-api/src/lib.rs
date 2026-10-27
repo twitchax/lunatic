@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use anyhow::Result;
-use lunatic_common_api::{get_memory, IntoTrap};
+use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use lunatic_process::state::ProcessState;
 use lunatic_process_api::ProcessCtx;
 use wasmtime::{Caller, Linker};
@@ -10,9 +10,9 @@ use wasmtime::{Caller, Linker};
 pub fn register<T: ProcessState + ProcessCtx<T> + Send + Sync + 'static>(
     linker: &mut Linker<T>,
 ) -> Result<()> {
-    linker.func_wrap4_async("lunatic::registry", "put", put)?;
-    linker.func_wrap4_async("lunatic::registry", "get", get)?;
-    linker.func_wrap2_async("lunatic::registry", "remove", remove)?;
+    linker.func_wrap_async_anyhow("lunatic::registry", "put", put)?;
+    linker.func_wrap_async_anyhow("lunatic::registry", "get", get)?;
+    linker.func_wrap_async_anyhow("lunatic::registry", "remove", remove)?;
 
     #[cfg(feature = "metrics")]
     metrics::describe_counter!(

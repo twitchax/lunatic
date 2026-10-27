@@ -13,5 +13,6 @@ lunatic-process = { workspace = true }
 lunatic-stdout-capture = { workspace = true }
 
 anyhow = { workspace = true }
+log = { workspace = true }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }

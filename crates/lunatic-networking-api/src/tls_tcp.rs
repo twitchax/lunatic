@@ -12,7 +12,7 @@ use tokio::{
 };
 use wasmtime::{Caller, Linker};
 
-use lunatic_common_api::{get_memory, IntoTrap};
+use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use lunatic_error_api::ErrorCtx;
 use webpki::TrustAnchor;
 
@@ -25,44 +25,44 @@ use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 pub fn register<T: NetworkingCtx + ErrorCtx + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> Result<()> {
-    linker.func_wrap10_async("lunatic::networking", "tls_bind", tls_bind)?;
-    linker.func_wrap(
+    linker.func_wrap_async_anyhow("lunatic::networking", "tls_bind", tls_bind)?;
+    linker.func_wrap_anyhow(
         "lunatic::networking",
         "drop_tls_listener",
         drop_tls_listener,
     )?;
-    linker.func_wrap("lunatic::networking", "tls_local_addr", tls_local_addr)?;
-    linker.func_wrap3_async("lunatic::networking", "tls_accept", tls_accept)?;
-    linker.func_wrap7_async("lunatic::networking", "tls_connect", tls_connect)?;
-    linker.func_wrap("lunatic::networking", "drop_tls_stream", drop_tls_stream)?;
-    linker.func_wrap("lunatic::networking", "clone_tls_stream", clone_tls_stream)?;
-    linker.func_wrap4_async(
+    linker.func_wrap_anyhow("lunatic::networking", "tls_local_addr", tls_local_addr)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tls_accept", tls_accept)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tls_connect", tls_connect)?;
+    linker.func_wrap_anyhow("lunatic::networking", "drop_tls_stream", drop_tls_stream)?;
+    linker.func_wrap_anyhow("lunatic::networking", "clone_tls_stream", clone_tls_stream)?;
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "tls_write_vectored",
         tls_write_vectored,
     )?;
-    linker.func_wrap4_async("lunatic::networking", "tls_read", tls_read)?;
-    linker.func_wrap2_async(
+    linker.func_wrap_async_anyhow("lunatic::networking", "tls_read", tls_read)?;
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "set_tls_read_timeout",
         set_tls_read_timeout,
     )?;
-    linker.func_wrap2_async(
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "set_tls_write_timeout",
         set_tls_write_timeout,
     )?;
-    linker.func_wrap1_async(
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "get_tls_read_timeout",
         get_tls_read_timeout,
     )?;
-    linker.func_wrap1_async(
+    linker.func_wrap_async_anyhow(
         "lunatic::networking",
         "get_tls_write_timeout",
         get_tls_write_timeout,
     )?;
-    linker.func_wrap2_async("lunatic::networking", "tls_flush", tls_flush)?;
+    linker.func_wrap_async_anyhow("lunatic::networking", "tls_flush", tls_flush)?;
     Ok(())
 }
 

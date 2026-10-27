@@ -1,12 +1,12 @@
 use std::future::Future;
 
 use anyhow::Result;
-use lunatic_common_api::IntoTrap;
+use lunatic_common_api::{IntoTrap, LinkerExt};
 use wasmtime::{Caller, Linker, Val};
 
 // Register the trap APIs to the linker
 pub fn register<T: Send + 'static>(linker: &mut Linker<T>) -> Result<()> {
-    linker.func_wrap2_async("lunatic::trap", "catch", catch_trap::<T>)?;
+    linker.func_wrap_async_anyhow("lunatic::trap", "catch", catch_trap::<T>)?;
     Ok(())
 }
 

@@ -20,12 +20,12 @@ use lunatic_process_api::{ProcessConfigCtx, ProcessCtx};
 use lunatic_sqlite_api::{SQLiteConnections, SQLiteCtx, SQLiteGuestAllocators, SQLiteStatements};
 use lunatic_stdout_capture::StdoutCapture;
 use lunatic_timer_api::{TimerCtx, TimerResources};
-use lunatic_wasi_api::{build_wasi, LunaticWasiCtx};
+use lunatic_wasi_api::{build_wasi, LunaticWasi, LunaticWasiCtx};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::{Mutex, RwLock};
 use wasmtime::{Linker, ResourceLimiter};
-use wasmtime_wasi::WasiCtx;
+use wasmtime_wasi::p1::WasiP1Ctx;
 
 use crate::DefaultProcessConfig;
 
@@ -61,7 +61,7 @@ pub struct DefaultProcessState {
     // Resources
     resources: Resources,
     // WASI
-    wasi: WasiCtx,
+    wasi: LunaticWasi,
     // WASI stdout stream
     wasi_stdout: Option<StdoutCapture>,
     // WASI stderr stream
@@ -221,12 +221,22 @@ impl Debug for DefaultProcessState {
 
 // Limit the maximum memory of the process depending on the environment it was spawned in.
 impl ResourceLimiter for DefaultProcessState {
-    fn memory_growing(&mut self, _current: usize, desired: usize, _maximum: Option<usize>) -> bool {
-        desired <= self.config().get_max_memory()
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(desired <= self.config().get_max_memory())
     }
 
-    fn table_growing(&mut self, _current: u32, desired: u32, _maximum: Option<u32>) -> bool {
-        desired < 100_000
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        Ok(desired < 100_000)
     }
 
     // Allow one instance per store
@@ -340,24 +350,20 @@ impl TimerCtx for DefaultProcessState {
 }
 
 impl LunaticWasiCtx for DefaultProcessState {
-    fn wasi(&self) -> &WasiCtx {
-        &self.wasi
-    }
-
-    fn wasi_mut(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
+    fn wasi_mut(&mut self) -> &mut WasiP1Ctx {
+        self.wasi.ctx()
     }
 
     // Redirect the stdout stream
     fn set_stdout(&mut self, stdout: StdoutCapture) {
         self.wasi_stdout = Some(stdout.clone());
-        self.wasi.set_stdout(Box::new(stdout));
+        self.wasi.set_stdout(stdout);
     }
 
     // Redirect the stderr stream
     fn set_stderr(&mut self, stderr: StdoutCapture) {
         self.wasi_stderr = Some(stderr.clone());
-        self.wasi.set_stderr(Box::new(stderr));
+        self.wasi.set_stderr(stderr);
     }
 
     fn get_stdout(&self) -> Option<&StdoutCapture> {
@@ -493,7 +499,7 @@ mod tests {
 
         // Create wasmtime runtime
         let mut wasmtime_config = wasmtime::Config::new();
-        wasmtime_config.async_support(true).consume_fuel(true);
+        wasmtime_config.consume_fuel(true);
         let runtime = WasmtimeRuntime::new(&wasmtime_config).unwrap();
 
         let raw_module = wat::parse_file("./wat/all_imports.wat").unwrap();
@@ -515,5 +521,105 @@ mod tests {
         spawn_wasm(env, runtime, &module, state, "hello", Vec::new(), None)
             .await
             .unwrap();
+    }
+
+    // Spawns the `hello` export of `wat` with the default runtime configuration.
+    #[cfg(test)]
+    async fn spawn_hello(
+        wat: &str,
+        config: crate::DefaultProcessConfig,
+        stdout: Option<lunatic_stdout_capture::StdoutCapture>,
+    ) -> tokio::task::JoinHandle<anyhow::Result<crate::state::DefaultProcessState>> {
+        use std::sync::Arc;
+
+        use lunatic_process::env::Environment;
+        use lunatic_process::runtimes::wasmtime::{default_config, WasmtimeRuntime};
+        use lunatic_process::wasm::spawn_wasm;
+        use lunatic_wasi_api::LunaticWasiCtx;
+
+        use crate::state::DefaultProcessState;
+
+        let runtime = WasmtimeRuntime::new(&default_config()).unwrap();
+        let raw_module = wat::parse_str(wat).unwrap();
+        let module = Arc::new(runtime.compile_module(raw_module.into()).unwrap());
+        let env = Arc::new(lunatic_process::env::LunaticEnvironment::new(0));
+        let mut state = DefaultProcessState::new(
+            env.clone(),
+            None,
+            runtime.clone(),
+            module.clone(),
+            Arc::new(config),
+            Default::default(),
+        )
+        .unwrap();
+        if let Some(stdout) = stdout {
+            state.set_stdout(stdout);
+        }
+
+        env.can_spawn_next_process().await.unwrap();
+        let (task, _) = spawn_wasm(env, runtime, &module, state, "hello", Vec::new(), None)
+            .await
+            .unwrap();
+        task
+    }
+
+    #[cfg(test)]
+    const BUSY_LOOP_WAT: &str = r#"(module (func (export "hello") (loop (br 0))))"#;
+
+    #[tokio::test]
+    async fn wasi_stdout_is_captured() {
+        use lunatic_stdout_capture::StdoutCapture;
+
+        // Writes "hello" to stdout with `fd_write`.
+        let wat = r#"
+            (module
+                (import "wasi_snapshot_preview1" "fd_write"
+                    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "hello")
+                (func (export "hello")
+                    (i32.store (i32.const 0) (i32.const 16))
+                    (i32.store (i32.const 4) (i32.const 5))
+                    (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 8)))))
+        "#;
+        let stdout = StdoutCapture::new(false);
+        let task = spawn_hello(wat, Default::default(), Some(stdout.clone())).await;
+
+        task.await.unwrap().unwrap();
+        assert_eq!(stdout.content(), "hello");
+    }
+
+    #[tokio::test]
+    async fn running_out_of_fuel_traps() {
+        use lunatic_process::config::ProcessConfig;
+
+        let mut config = crate::DefaultProcessConfig::default();
+        config.set_max_fuel(Some(1));
+        let task = spawn_hello(BUSY_LOOP_WAT, config, None).await;
+
+        // Without a fuel limit this would loop forever.
+        assert!(task.await.unwrap().is_err());
+    }
+
+    #[test]
+    fn busy_guest_yields_to_other_tasks() {
+        use std::time::Duration;
+
+        let (done_sender, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let _task = spawn_hello(BUSY_LOOP_WAT, Default::default(), None).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                done_sender.send(()).unwrap();
+            });
+        });
+
+        // A guest that never yields would starve the single-threaded executor.
+        done.recv_timeout(Duration::from_secs(30))
+            .expect("the guest didn't yield back to the executor");
     }
 }

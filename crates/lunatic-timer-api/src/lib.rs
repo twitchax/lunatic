@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Result;
 use hash_map_id::HashMapId;
-use lunatic_common_api::IntoTrap;
+use lunatic_common_api::{IntoTrap, LinkerExt};
 use lunatic_process::{state::ProcessState, Signal};
 use lunatic_process_api::ProcessCtx;
 use tokio::task::JoinHandle;
@@ -87,8 +87,8 @@ pub trait TimerCtx {
 pub fn register<T: ProcessState + ProcessCtx<T> + TimerCtx + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> Result<()> {
-    linker.func_wrap("lunatic::timer", "send_after", send_after)?;
-    linker.func_wrap1_async("lunatic::timer", "cancel_timer", cancel_timer)?;
+    linker.func_wrap_anyhow("lunatic::timer", "send_after", send_after)?;
+    linker.func_wrap_async_anyhow("lunatic::timer", "cancel_timer", cancel_timer)?;
 
     #[cfg(feature = "metrics")]
     metrics::describe_counter!(
