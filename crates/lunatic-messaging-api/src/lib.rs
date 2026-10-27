@@ -1,5 +1,4 @@
 use std::{
-    convert::TryInto,
     future::Future,
     io::{Read, Write},
 };
@@ -577,8 +576,10 @@ fn receive<T: ProcessState + ProcessCtx<T> + Send>(
 
             // Gether all tags
             let tags: Vec<i64> = buffer
-                .chunks_exact(8)
-                .map(|chunk| i64::from_le_bytes(chunk.try_into().expect("works")))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| i64::from_le_bytes(*chunk))
                 .collect();
             Some(tags)
         } else {

@@ -393,7 +393,9 @@ fn tcp_write_vectored<T: NetworkingCtx + ErrorCtx + Send>(
 
         // Ciovecs consist of 32bit ptr + 32bit len = 8 bytes.
         let vec_slices: Result<Vec<_>> = buffer
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|ciovec| {
                 let ciovec_ptr =
                     u32::from_le_bytes(ciovec[0..4].try_into().expect("works")) as usize;

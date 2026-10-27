@@ -44,7 +44,7 @@ fn catch_trap<T: Send>(
             .call_async(caller, &params, &mut result)
             .await;
         match execution_result {
-            Ok(()) => Ok(result.get(0).unwrap().i32().unwrap()),
+            Ok(()) => Ok(result.first().unwrap().i32().unwrap()),
             Err(_) => Ok(0),
         }
     })

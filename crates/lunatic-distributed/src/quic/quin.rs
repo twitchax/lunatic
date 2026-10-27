@@ -56,7 +56,7 @@ fn get_cert_attrs(conn: &Connection) -> Result<CertAttrs> {
     if peer_identity.len() != 1 {
         return Err(anyhow!("More than one identity certificate detected."));
     }
-    let cert = peer_identity.get(0).unwrap();
+    let cert = peer_identity.first().unwrap();
     let (_rem, x509) = x509_parser::certificate::X509Certificate::from_der(&cert.0)?;
     let oid = oid!(2.5.29 .9);
     let ext = x509

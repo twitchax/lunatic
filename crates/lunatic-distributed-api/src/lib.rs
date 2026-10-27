@@ -409,7 +409,9 @@ where
             .get(params_ptr as usize..(params_ptr + params_len) as usize)
             .or_trap("lunatic::distributed::spawn::params")?;
         let params = params
-            .chunks_exact(17)
+            .as_chunks::<17>()
+            .0
+            .iter()
             .map(|chunk| {
                 let value = u128::from_le_bytes(chunk[1..].try_into()?);
                 let result = match chunk[0] {

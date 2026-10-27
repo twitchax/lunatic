@@ -130,7 +130,7 @@ mod tests {
     fn add_panics_on_integer_overflow() {
         let mut hash: HashMapId<i32> = HashMapId::new();
         let item = 10;
-        hash.id_seed = std::u64::MAX;
+        hash.id_seed = u64::MAX;
         hash.add(item);
     }
 

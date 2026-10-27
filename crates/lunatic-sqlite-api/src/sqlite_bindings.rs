@@ -164,7 +164,6 @@ fn query_prepare<T: ProcessState + ErrorCtx + SQLiteCtx>(
         let conn = state
             .sqlite_connections()
             .get(conn_id)
-            .take()
             .or_trap("lunatic::sqlite::query_prepare::obtain_conn")?
             .lock()
             .or_trap("lunatic::sqlite::query_prepare::obtain_conn")?;

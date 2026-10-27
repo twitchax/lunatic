@@ -82,12 +82,12 @@ pub(crate) async fn start(args: Args) -> Result<()> {
                 domains: project.domains,
                 app_id: project_details
                     .apps
-                    .get(0)
+                    .first()
                     .map(|app| app.app_id)
                     .ok_or_else(|| anyhow!("Unexpected config missing app_id"))?,
                 env_id: project_details
                     .envs
-                    .get(0)
+                    .first()
                     .map(|env| env.env_id)
                     .ok_or_else(|| anyhow!("Unexpected config missing env_id"))?,
                 env_vars: None,

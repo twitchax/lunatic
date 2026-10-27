@@ -155,12 +155,12 @@ impl Client {
             )
             .send()
             .await
-            .with_context(|| format!("Error sending HTTP GET request: {}.", &url))?
+            .with_context(|| format!("Error sending HTTP GET request: {}.", url))?
             .error_for_status()
-            .with_context(|| format!("HTTP GET request returned an error response: {}", &url))?
+            .with_context(|| format!("HTTP GET request returned an error response: {}", url))?
             .json()
             .await
-            .with_context(|| format!("Error parsing the HTTP GET request JSON: {}", &url))?;
+            .with_context(|| format!("Error parsing the HTTP GET request JSON: {}", url))?;
 
         Ok(resp)
     }
@@ -180,12 +180,12 @@ impl Client {
             )
             .send()
             .await
-            .with_context(|| format!("Error sending HTTP POST request: {}.", &url))?
+            .with_context(|| format!("Error sending HTTP POST request: {}.", url))?
             .error_for_status()
-            .with_context(|| format!("HTTP POST request returned an error response: {}", &url))?
+            .with_context(|| format!("HTTP POST request returned an error response: {}", url))?
             .json()
             .await
-            .with_context(|| format!("Error parsing the HTTP POST request JSON: {}", &url))?;
+            .with_context(|| format!("Error parsing the HTTP POST request JSON: {}", url))?;
 
         Ok(resp)
     }
@@ -205,13 +205,13 @@ impl Client {
             )
             .send()
             .await
-            .with_context(|| format!("Error sending HTTP POST request: {}.", &url))?
+            .with_context(|| format!("Error sending HTTP POST request: {}.", url))?
             .error_for_status()
-            .with_context(|| format!("HTTP POST request returned an error response: {}", &url))
+            .with_context(|| format!("HTTP POST request returned an error response: {}", url))
             .map_err(|e| dbg!(e))?
             .json()
             .await
-            .with_context(|| format!("Error parsing the HTTP POST request JSON: {}", &url))?;
+            .with_context(|| format!("Error parsing the HTTP POST request JSON: {}", url))?;
 
         Ok(resp)
     }
@@ -233,7 +233,8 @@ impl Client {
     }
 
     pub async fn notify_node_stopped(&self) -> Result<()> {
-        self.post(&self.inner.reg.urls.node_stopped, ()).await?;
+        self.post::<_, ()>(&self.inner.reg.urls.node_stopped, ())
+            .await?;
         Ok(())
     }
 

@@ -4,11 +4,11 @@ modules. This `lunatic-runtime` library allows you to embed the `lunatic vm` ins
 code.
 
 > _The actor model in computer science is a mathematical model of concurrent computation that
-treats actor as the universal primitive of concurrent computation. In response to a message it
-receives, an actor can: make local decisions, create more actors, send more messages, and
-determine how to respond to the next message received. Actors may modify their own private
-state, but can only affect each other indirectly through messaging (removing the need for
-lock-based synchronization)._
+> treats actor as the universal primitive of concurrent computation. In response to a message it
+> receives, an actor can: make local decisions, create more actors, send more messages, and
+> determine how to respond to the next message received. Actors may modify their own private
+> state, but can only affect each other indirectly through messaging (removing the need for
+> lock-based synchronization)._
 >
 > Source: <https://en.wikipedia.org/wiki/Actor_model>
 

@@ -19,6 +19,7 @@ pub(crate) fn start() -> Result<()> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(".cargo/config.toml")
         .unwrap();
 

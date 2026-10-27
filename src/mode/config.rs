@@ -122,6 +122,7 @@ where
     fn from_toml_file(path: PathBuf) -> Self {
         match fs::File::options()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path.clone())

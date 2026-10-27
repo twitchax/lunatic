@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod host_api;
-#[cfg(not(target_arch = "wasm32"))]
-pub use host_api::*;
 
 #[cfg(target_arch = "wasm32")]
 mod guest_api;

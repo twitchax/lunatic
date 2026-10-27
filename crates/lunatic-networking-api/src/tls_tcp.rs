@@ -281,10 +281,7 @@ fn load_private_key(file: &[u8]) -> io::Result<rustls::PrivateKey> {
     // Load and return a single private key.
     let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)?;
     if keys.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "expected a single private key",
-        ));
+        return Err(io::Error::other("expected a single private key"));
     }
 
     Ok(rustls::PrivateKey(keys[0].clone()))
@@ -294,10 +291,7 @@ fn load_certs(file: &[u8]) -> io::Result<rustls::Certificate> {
     let mut reader = io::BufReader::new(file);
     let certs = rustls_pemfile::certs(&mut reader)?;
     if certs.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "expected a single private key",
-        ));
+        return Err(io::Error::other("expected a single private key"));
     }
 
     Ok(rustls::Certificate(certs[0].clone()))
@@ -349,7 +343,9 @@ fn tls_connect<T: NetworkingCtx + ErrorCtx + Send>(
                 .to_vec();
 
             let vec_slices: Result<Vec<_>> = certs_list
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .map(|ciovec| {
                     let ciovec_ptr = u32::from_le_bytes(
                         ciovec[0..4]
@@ -501,7 +497,9 @@ fn tls_write_vectored<T: NetworkingCtx + ErrorCtx + Send>(
 
         // Ciovecs consist of 32bit ptr + 32bit len = 8 bytes.
         let vec_slices: Result<Vec<_>> = buffer
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|ciovec| {
                 let ciovec_ptr = u32::from_le_bytes(
                     ciovec[0..4]

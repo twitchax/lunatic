@@ -36,7 +36,7 @@ pub(crate) struct Args {
     /// The locally-known address of the node server.
     /// This can be unset, unless binding publicly, in which case
     /// `0.0.0.0:{port}` or `[::]:{port}` may be preferred.
-    /// 
+    ///
     /// If not provided, the node will bind to a random port on localhost.
     #[arg(long, value_name = "NODE_SOCKET")]
     bind_socket: Option<SocketAddr>,
@@ -44,11 +44,11 @@ pub(crate) struct Args {
     /// The address of the node server as reachable from the control server (or other nodes).
     /// This can be unset, unless binding publicly, in which case
     /// `{some_public_ip}:{port}` may be preferred.
-    /// 
+    ///
     /// If this is not set, then, generally, only `localhost` type connections
-    /// will work from other nodes, as, otherwise, the nodes have no way of knowing the 
+    /// will work from other nodes, as, otherwise, the nodes have no way of knowing the
     /// "reachable" address of the node.
-    /// 
+    ///
     /// If not provided, this value will fall back to the value of `NODE_SOCKET`.
     #[arg(long, value_name = "REACHABLE_SOCKET")]
     reachable_socket: Option<SocketAddr>,
@@ -111,8 +111,13 @@ pub(crate) async fn start(args: Args) -> Result<()> {
         )
     };
 
-    let control_client =
-        control::Client::new(http_client.clone(), reg.clone(), reachable_socket, node_attributes).await?;
+    let control_client = control::Client::new(
+        http_client.clone(),
+        reg.clone(),
+        reachable_socket,
+        node_attributes,
+    )
+    .await?;
 
     let node_id = control_client.node_id();
 
@@ -121,7 +126,7 @@ pub(crate) async fn start(args: Args) -> Result<()> {
     let quic_client = quic::new_quic_client(
         &reg.root_cert,
         reg.cert_pem_chain
-            .get(0)
+            .first()
             .ok_or_else(|| anyhow!("No certificate available for QUIC client"))?,
         &node_cert.serialize_private_key_pem(),
     )

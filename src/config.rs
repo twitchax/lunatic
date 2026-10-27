@@ -146,10 +146,7 @@ impl ProcessConfigCtx for DefaultProcessConfig {
         let has_access = self
             .preopened_dirs()
             .iter()
-            .filter_map(|(_, dir)| match get_absolute_path(Path::new(dir)) {
-                Ok(d) => Some(d),
-                _ => None,
-            })
+            .filter_map(|(_, dir)| get_absolute_path(Path::new(dir)).ok())
             .any(|dir| dir.exists() && path_is_ancestor(&dir, &parent_dir));
 
         match has_access {
@@ -231,6 +228,21 @@ fn normalize_path(path: &Path) -> PathBuf {
     ret
 }
 
+impl Default for DefaultProcessConfig {
+    fn default() -> Self {
+        Self {
+            max_memory: u32::MAX as usize, // = 4 GB
+            max_fuel: None,
+            can_compile_modules: false,
+            can_create_configs: false,
+            can_spawn_processes: false,
+            preopened_dirs: vec![],
+            command_line_arguments: vec![],
+            environment_variables: vec![],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -284,20 +296,5 @@ mod tests {
             get_absolute_path(Path::new("crates/lunatic-sqlite-api/src/../src/../../")).unwrap();
         assert_eq!(src, normalize_path(&sneaky_src));
         assert_eq!(crates, normalize_path(&sneaky_path));
-    }
-}
-
-impl Default for DefaultProcessConfig {
-    fn default() -> Self {
-        Self {
-            max_memory: u32::MAX as usize, // = 4 GB
-            max_fuel: None,
-            can_compile_modules: false,
-            can_create_configs: false,
-            can_spawn_processes: false,
-            preopened_dirs: vec![],
-            command_line_arguments: vec![],
-            environment_variables: vec![],
-        }
     }
 }
