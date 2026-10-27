@@ -14,11 +14,16 @@ use wasmtime::{Caller, Linker};
 
 use lunatic_common_api::{get_memory, IntoTrap, LinkerExt};
 use lunatic_error_api::ErrorCtx;
-use webpki::TrustAnchor;
 
 use crate::dns::DnsIterator;
 use crate::{socket_address, NetworkingCtx, TlsConnection, TlsListener};
-use tokio_rustls::rustls::{self, OwnedTrustAnchor};
+use tokio_rustls::rustls::{
+    self,
+    crypto::{ring, CryptoProvider},
+    pki_types::{
+        pem::PemObject, CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, TrustAnchor,
+    },
+};
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
 // Register TLS networking APIs to the linker
@@ -221,14 +226,15 @@ fn tls_accept<T: NetworkingCtx + ErrorCtx + Send>(
             .tls_listener_resources()
             .get(listener_id)
             .or_trap("lunatic::network::tls_accept")?;
-        let keys = tls_listener.keys.clone();
+        let keys = tls_listener.keys.clone_key();
         let certs = tls_listener.certs.clone();
 
         let (tls_stream_or_error_id, peer_addr_iter, result) =
             match tls_listener.listener.accept().await {
                 Ok((stream, socket_addr)) => {
-                    let config = rustls::ServerConfig::builder()
-                        .with_safe_defaults()
+                    let config = rustls::ServerConfig::builder_with_provider(crypto_provider())
+                        .with_safe_default_protocol_versions()
+                        .or_trap("lunatic::network::tls_accept server_config")?
                         .with_no_client_auth()
                         .with_single_cert(vec![certs], keys)
                         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
@@ -274,27 +280,33 @@ fn tls_accept<T: NetworkingCtx + ErrorCtx + Send>(
     })
 }
 
-// Load private key from file.
-fn load_private_key(file: &[u8]) -> io::Result<rustls::PrivateKey> {
-    let mut reader = io::BufReader::new(file);
+// The crypto provider of all TLS connections (rustls' former default, *ring*).
+fn crypto_provider() -> Arc<CryptoProvider> {
+    Arc::new(ring::default_provider())
+}
 
+// Load private key from file.
+fn load_private_key(file: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
     // Load and return a single private key.
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)?;
+    let mut keys = PrivatePkcs8KeyDer::pem_slice_iter(file)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io::Error::other)?;
     if keys.len() != 1 {
         return Err(io::Error::other("expected a single private key"));
     }
 
-    Ok(rustls::PrivateKey(keys[0].clone()))
+    Ok(keys.remove(0).into())
 }
 
-fn load_certs(file: &[u8]) -> io::Result<rustls::Certificate> {
-    let mut reader = io::BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)?;
+fn load_certs(file: &[u8]) -> io::Result<CertificateDer<'static>> {
+    let mut certs = CertificateDer::pem_slice_iter(file)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io::Error::other)?;
     if certs.len() != 1 {
         return Err(io::Error::other("expected a single private key"));
     }
 
-    Ok(rustls::Certificate(certs[0].clone()))
+    Ok(certs.remove(0))
 }
 
 // If timeout is specified (value different from `u64::MAX`), the function will return on timeout
@@ -374,28 +386,19 @@ fn tls_connect<T: NetworkingCtx + ErrorCtx + Send>(
                 .map(|pem| {
                     let certs =
                         load_certs(pem).or_trap("lunatic::networking::tls_connect::load_certs")?;
-                    let ta = TrustAnchor::try_from_cert_der(&certs.0[..])
+                    let ta = webpki::anchor_from_trusted_cert(&certs)
                         .or_trap("lunatic::networking::tls_connect::load_cert DER")?;
-                    Ok(OwnedTrustAnchor::from_subject_spki_name_constraints(
-                        ta.subject,
-                        ta.spki,
-                        ta.name_constraints,
-                    ))
+                    Ok(ta.to_owned())
                 })
-                .filter_map(|r: Result<OwnedTrustAnchor>| r.ok());
-            root_cert_store.add_trust_anchors(trust_anchors);
+                .filter_map(|r: Result<TrustAnchor<'static>>| r.ok());
+            root_cert_store.extend(trust_anchors);
         } else {
-            root_cert_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
-                OwnedTrustAnchor::from_subject_spki_name_constraints(
-                    ta.subject,
-                    ta.spki,
-                    ta.name_constraints,
-                )
-            }));
+            root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         }
 
-        let config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
+        let config = rustls::ClientConfig::builder_with_provider(crypto_provider())
+            .with_safe_default_protocol_versions()
+            .or_trap("lunatic::networking::tls_connect::client_config")?
             .with_root_certificates(root_cert_store)
             .with_no_client_auth(); // i guess this was previously the default?
 
@@ -410,8 +413,9 @@ fn tls_connect<T: NetworkingCtx + ErrorCtx + Send>(
             let (stream_or_error_id, result) = match result {
                 Ok(stream) => {
                     let domain = &socket_addr[..];
-                    let domain = rustls::ServerName::try_from(domain)
-                        .or_trap("lunatic::networking::tls_connect::invalid_dnsname")?;
+                    let domain = ServerName::try_from(domain)
+                        .or_trap("lunatic::networking::tls_connect::invalid_dnsname")?
+                        .to_owned();
 
                     let stream = connector
                         .connect(domain, stream)
@@ -752,4 +756,62 @@ fn tls_flush<T: NetworkingCtx + ErrorCtx + Send>(
             .or_trap("lunatic::networking::tls_flush")?;
         Ok(result)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CERT: &str = "-----BEGIN CERTIFICATE-----
+MIIBnDCCAUGgAwIBAgIIR5Hk+O5RdOgwCgYIKoZIzj0EAwIwKTEQMA4GA1UEAwwH
+Um9vdCBDQTEVMBMGA1UECgwMTHVuYXRpYyBJbmMuMCAXDTc1MDEwMTAwMDAwMFoY
+DzQwOTYwMTAxMDAwMDAwWjApMRAwDgYDVQQDDAdSb290IENBMRUwEwYDVQQKDAxM
+dW5hdGljIEluYy4wWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARlVNxYAwsmmFNc
+2EMBbZZVwL8GBtnnu8IROdDd68ixc0VBjfrV0zAM344lKJcs9slsMTEofoYvMCpI
+BhnSGyAFo1EwTzAdBgNVHREEFjAUghJyb290Lmx1bmF0aWMuY2xvdWQwHQYDVR0O
+BBYEFOh0Ue745JFH76xErjqkW2/SbHhAMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZI
+zj0EAwIDSQAwRgIhAJKPv4XUZ9ej+CVgsJ+9x/CmJEcnebyWh2KntJri97nxAiEA
+/KvaQE6GtYZPGFv/WYM3YEmTQ7hoOvaaAuvD27cHkaw=
+-----END CERTIFICATE-----
+";
+
+    const KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg9ferf0du4h975Jhu
+boMyGfdI+xwp7ewOulGvpTcvdpehRANCAARlVNxYAwsmmFNc2EMBbZZVwL8GBtnn
+u8IROdDd68ixc0VBjfrV0zAM344lKJcs9slsMTEofoYvMCpIBhnSGyAF
+-----END PRIVATE KEY-----
+";
+
+    #[test]
+    fn loaded_certificate_and_key_make_a_server_config() {
+        let certs = load_certs(CERT.as_bytes()).unwrap();
+        let keys = load_private_key(KEY.as_bytes()).unwrap();
+
+        rustls::ServerConfig::builder_with_provider(crypto_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certs], keys)
+            .unwrap();
+    }
+
+    #[test]
+    fn loading_expects_exactly_one_item() {
+        assert!(load_certs(format!("{CERT}{CERT}").as_bytes()).is_err());
+        assert!(load_certs(b"").is_err());
+        assert!(load_private_key(format!("{KEY}{KEY}").as_bytes()).is_err());
+        assert!(load_private_key(CERT.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn trust_anchors_load_from_certificates() {
+        let certs = load_certs(CERT.as_bytes()).unwrap();
+        let mut root_cert_store = rustls::RootCertStore::empty();
+        root_cert_store.extend([webpki::anchor_from_trusted_cert(&certs).unwrap().to_owned()]);
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        assert_eq!(
+            root_cert_store.len(),
+            webpki_roots::TLS_SERVER_ROOTS.len() + 1
+        );
+    }
 }

@@ -17,7 +17,7 @@ use lunatic_process::{
     message::{DataMessage, Message},
 };
 use lunatic_process_api::ProcessCtx;
-use rcgen::{Certificate, CertificateParams, CertificateSigningRequest, CustomExtension, KeyPair};
+use rcgen::{CertificateSigningRequestParams, CustomExtension};
 use tokio::time::timeout;
 use wasmtime::{Caller, Linker, ResourceLimiter};
 
@@ -206,13 +206,7 @@ where
 {
     Box::new(async move {
         let memory = get_memory(&mut caller)?;
-        let root_cert = lunatic_distributed::control::cert::test_root_cert()
-            .or_trap("lunatic::distributed::test_root_cert")?;
-
-        let cert_pem = root_cert
-            .serialize_pem()
-            .or_trap("lunatic::distributed::test_root_cert")?;
-        let key_pair_pem = root_cert.serialize_private_key_pem();
+        let (cert_pem, key_pair_pem) = lunatic_distributed::control::cert::test_root_cert_pem();
 
         let data = bincode::serialize(&(cert_pem, key_pair_pem))
             .or_trap("lunatic::distributed::test_root_cert")?;
@@ -253,12 +247,7 @@ where
         let pk_pem = std::str::from_utf8(pk_pem_bytes)
             .or_trap("lunatic::distributed::default_server_certificates")?;
 
-        let key_pair = KeyPair::from_pem(pk_pem)
-            .or_trap("lunatic::distributed::default_server_certificates")?;
-        let cert_params = CertificateParams::from_ca_cert_pem(cert_pem, key_pair)
-            .or_trap("lunatic::distributed::default_server_certificates")?;
-
-        let root_cert = Certificate::from_params(cert_params)
+        let root_cert = lunatic_distributed::control::cert::root_cert_from_pem(cert_pem, pk_pem)
             .or_trap("lunatic::distributed::default_server_certificates")?;
 
         let (ctrl_cert, ctrl_pk) =
@@ -313,14 +302,10 @@ where
         let csr_pem =
             std::str::from_utf8(csr_pem_bytes).or_trap("lunatic::distributed::sign_node")?;
 
-        let key_pair = KeyPair::from_pem(pk_pem).or_trap("lunatic::distributed::sign_node")?;
-        let cert_params = CertificateParams::from_ca_cert_pem(cert_pem, key_pair)
+        let ca_cert = lunatic_distributed::control::cert::root_cert_from_pem(cert_pem, pk_pem)
             .or_trap("lunatic::distributed::sign_node")?;
 
-        let ca_cert =
-            Certificate::from_params(cert_params).or_trap("lunatic::distributed::sign_node")?;
-
-        let mut csr = CertificateSigningRequest::from_pem(csr_pem)
+        let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)
             .or_trap("lunatic::distributed::sign_node")?;
         // Add json to custom certificate extension
         csr.params
@@ -336,8 +321,9 @@ where
                 .or_trap("lunatic::distributed::sign_node")?,
             ));
         let cert_pem = csr
-            .serialize_pem_with_signer(&ca_cert)
-            .or_trap("lunatic::distributed::sign_node")?;
+            .signed_by(&ca_cert)
+            .or_trap("lunatic::distributed::sign_node")?
+            .pem();
         let data = bincode::serialize(&cert_pem).or_trap("lunatic::distributed::sign_node")?;
         let ptr = write_to_guest_vec(&mut caller, &memory, &data, len_ptr)
             .await

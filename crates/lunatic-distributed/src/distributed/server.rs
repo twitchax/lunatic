@@ -54,14 +54,19 @@ pub fn root_cert(ca_cert: &str) -> Result<String> {
     Ok(std::str::from_utf8(&cert)?.to_string())
 }
 
-pub fn gen_node_cert(node_name: &str) -> Result<Certificate> {
-    let mut params = CertificateParams::new(vec![node_name.to_string()]);
-    params
-        .distinguished_name
-        .push(DnType::OrganizationName, "Lunatic Inc.");
-    params.distinguished_name.push(DnType::CommonName, "Node");
-    Certificate::from_params(params)
-        .map_err(|_| anyhow!("Error while generating node certificate."))
+/// Generates a node's certificate signing request, together with its private key.
+pub fn gen_node_cert(node_name: &str) -> Result<(CertificateSigningRequest, KeyPair)> {
+    let generate = || {
+        let mut params = CertificateParams::new(vec![node_name.to_string()])?;
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "Lunatic Inc.");
+        params.distinguished_name.push(DnType::CommonName, "Node");
+        let key_pair = KeyPair::generate()?;
+        let csr = params.serialize_request(&key_pair)?;
+        Ok::<_, rcgen::Error>((csr, key_pair))
+    };
+    generate().map_err(|_| anyhow!("Error while generating node certificate."))
 }
 
 pub async fn node_server<T, E>(

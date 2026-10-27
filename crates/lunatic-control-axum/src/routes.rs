@@ -9,7 +9,7 @@ use axum::{
 };
 use lunatic_control::{api::*, NodeInfo};
 use lunatic_distributed::{control::cert::TEST_ROOT_CERT, CertAttrs, SUBJECT_DIR_ATTRS};
-use rcgen::{CertificateSigningRequest, CustomExtension};
+use rcgen::{CertificateSigningRequestParams, CustomExtension};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::{
@@ -26,12 +26,13 @@ pub async fn register(
 
     let control = control.as_ref();
 
-    let mut sign_request = CertificateSigningRequest::from_pem(&reg.csr_pem).map_err(|e| {
-        ApiError::custom(
-            "sign_error",
-            format!("Certificate Signing Request invalid pem format: {}", e),
-        )
-    })?;
+    let mut sign_request =
+        CertificateSigningRequestParams::from_pem(&reg.csr_pem).map_err(|e| {
+            ApiError::custom(
+                "sign_error",
+                format!("Certificate Signing Request invalid pem format: {}", e),
+            )
+        })?;
     // Add json to custom certificate extension
     sign_request
         .params
@@ -47,8 +48,9 @@ pub async fn register(
             .map_err(|e| ApiError::log_internal("Error serializing allowed envs to der", e))?,
         ));
     let cert_pem = sign_request
-        .serialize_pem_with_signer(&control.ca_cert)
-        .map_err(|e| ApiError::custom("sign_error", e.to_string()))?;
+        .signed_by(&control.ca_cert)
+        .map_err(|e| ApiError::custom("sign_error", e.to_string()))?
+        .pem();
 
     let mut authentication_token = [0u8; 32];
     getrandom::getrandom(&mut authentication_token)

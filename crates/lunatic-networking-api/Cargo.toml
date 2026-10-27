@@ -13,9 +13,8 @@ lunatic-common-api = { workspace = true }
 lunatic-error-api = { workspace = true }
 
 anyhow = { workspace = true }
-rustls-pemfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
-tokio-rustls = "0.24.1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 wasmtime = { workspace = true }
-webpki-roots = "0.25.2"
-rustls-webpki = "0.101.4"
+webpki-roots = "1"
+rustls-webpki = "0.103"

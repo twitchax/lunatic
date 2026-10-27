@@ -12,13 +12,13 @@ use axum::{Extension, Router};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use lunatic_control::api::{NodeStart, Register};
-use rcgen::Certificate;
+use rcgen::{Issuer, KeyPair};
 use uuid::Uuid;
 
 use crate::routes;
 
 pub struct ControlServer {
-    pub ca_cert: Certificate,
+    pub ca_cert: Issuer<'static, KeyPair>,
     pub quic_client: lunatic_distributed::quic::Client,
     pub registrations: DashMap<u64, Registered>,
     pub nodes: DashMap<u64, NodeDetails>,
@@ -46,7 +46,10 @@ pub struct NodeDetails {
 }
 
 impl ControlServer {
-    pub fn new(ca_cert: Certificate, quic_client: lunatic_distributed::quic::Client) -> Self {
+    pub fn new(
+        ca_cert: Issuer<'static, KeyPair>,
+        quic_client: lunatic_distributed::quic::Client,
+    ) -> Self {
         Self {
             ca_cert,
             quic_client,

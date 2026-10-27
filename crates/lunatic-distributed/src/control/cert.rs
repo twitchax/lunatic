@@ -26,37 +26,46 @@ boMyGfdI+xwp7ewOulGvpTcvdpehRANCAARlVNxYAwsmmFNc2EMBbZZVwL8GBtnn
 u8IROdDd68ixc0VBjfrV0zAM344lKJcs9slsMTEofoYvMCpIBhnSGyAF
 -----END PRIVATE KEY-----"""#;
 
-pub fn test_root_cert() -> Result<Certificate> {
-    let key_pair = KeyPair::from_pem(TEST_ROOT_KEYS)?;
-    let root_params = CertificateParams::from_ca_cert_pem(TEST_ROOT_CERT, key_pair)?;
-    let root_cert = Certificate::from_params(root_params)?;
-    Ok(root_cert)
+/// The test root CA as an issuer of certificates.
+pub fn test_root_cert() -> Result<Issuer<'static, KeyPair>> {
+    root_cert_from_pem(TEST_ROOT_CERT, TEST_ROOT_KEYS)
 }
 
-pub fn root_cert(ca_cert: &str, ca_keys: &str) -> Result<Certificate> {
+/// The test root CA's certificate and private key, both PEM encoded.
+pub fn test_root_cert_pem() -> (String, String) {
+    (TEST_ROOT_CERT.to_string(), TEST_ROOT_KEYS.to_string())
+}
+
+pub fn root_cert(ca_cert: &str, ca_keys: &str) -> Result<Issuer<'static, KeyPair>> {
     let ca_cert_pem = std::fs::read(Path::new(ca_cert))?;
     let ca_keys_pem = std::fs::read(Path::new(ca_keys))?;
-    let key_pair = KeyPair::from_pem(std::str::from_utf8(&ca_keys_pem)?)?;
-    let root_params =
-        CertificateParams::from_ca_cert_pem(std::str::from_utf8(&ca_cert_pem)?, key_pair)?;
-    let root_cert = Certificate::from_params(root_params)?;
-    Ok(root_cert)
+    root_cert_from_pem(
+        std::str::from_utf8(&ca_cert_pem)?,
+        std::str::from_utf8(&ca_keys_pem)?,
+    )
 }
 
-fn ctrl_cert() -> Result<Certificate> {
-    let mut ctrl_params = CertificateParams::new(vec![CTRL_SERVER_NAME.into()]);
+/// A CA, given its PEM encoded certificate and private key, as an issuer of certificates.
+pub fn root_cert_from_pem(ca_cert: &str, ca_keys: &str) -> Result<Issuer<'static, KeyPair>> {
+    let key_pair = KeyPair::from_pem(ca_keys)?;
+    Ok(Issuer::from_ca_cert_pem(ca_cert, key_pair)?)
+}
+
+fn ctrl_cert_params() -> Result<CertificateParams> {
+    let mut ctrl_params = CertificateParams::new(vec![CTRL_SERVER_NAME.into()])?;
     ctrl_params
         .distinguished_name
         .push(DnType::OrganizationName, "Lunatic Inc.");
     ctrl_params
         .distinguished_name
         .push(DnType::CommonName, "Control CA");
-    Ok(Certificate::from_params(ctrl_params)?)
+    Ok(ctrl_params)
 }
 
-pub fn default_server_certificates(root_cert: &Certificate) -> Result<(String, String)> {
-    let ctrl_cert = ctrl_cert()?;
-    let cert_pem = ctrl_cert.serialize_pem_with_signer(root_cert)?;
-    let key_pem = ctrl_cert.serialize_private_key_pem();
-    Ok((cert_pem, key_pem))
+pub fn default_server_certificates(
+    root_cert: &Issuer<'_, impl SigningKey>,
+) -> Result<(String, String)> {
+    let ctrl_key = KeyPair::generate()?;
+    let ctrl_cert = ctrl_cert_params()?.signed_by(&ctrl_key, root_cert)?;
+    Ok((ctrl_cert.pem(), ctrl_key.serialize_pem()))
 }
