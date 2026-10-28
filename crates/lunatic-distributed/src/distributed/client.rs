@@ -185,6 +185,11 @@ impl Client {
         Ok(message_id)
     }
 
+    // Whether the control server stopped listing the node, e.g. because the node stopped.
+    pub(crate) fn node_is_gone(&self, node: NodeId) -> bool {
+        !self.inner.control_client.node_ids().contains(&node.0)
+    }
+
     pub fn remove_process_resources(&self, env: EnvironmentId, process_id: ProcessId) {
         self.inner.buf_tx.remove(&(env, process_id));
     }

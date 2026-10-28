@@ -42,17 +42,14 @@
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc},
+    time::Duration,
 };
 
 use anyhow::Result;
 use dashmap::DashMap;
 use lunatic_control::NodeInfo;
 use tokio::sync::{
-    mpsc::{
-        self,
-        error::{TryRecvError, TrySendError},
-        Receiver, Sender,
-    },
+    mpsc::{self, error::TryRecvError, Receiver, Sender},
     Notify, RwLock,
 };
 
@@ -83,12 +80,21 @@ pub async fn congestion_control_worker(state: distributed::Client) -> ! {
         &inner.in_progress,
         &inner.nodes_queues,
         &inner.has_messages,
+        |node| state.node_is_gone(node),
     )
     .await
 }
 
+// How long the worker waits before retrying messages it can't hand to their nodes' connections.
+const MIN_BACKOFF: Duration = Duration::from_millis(1);
+const MAX_BACKOFF: Duration = Duration::from_secs(1);
+
 // Passes over the message queues of all processes, sending the next chunk of each process'
 // current message to its node's connection manager, until no message is left in progress.
+//
+// A message whose node's connection can't take its next chunk stays in progress, so that the
+// process' later messages keep their order, until its node is gone. Then it's dropped, and the
+// node's connection is freed.
 //
 // No guard of the maps is held across an `.await`, because processes keep queueing messages (and
 // creating queues) while this waits.
@@ -97,9 +103,11 @@ async fn forward_messages(
     in_progress: &DashMap<(EnvironmentId, ProcessId), MessageCtx>,
     nodes_queues: &DashMap<NodeId, Sender<MessageChunk>>,
     has_messages: &Notify,
+    node_is_gone: impl Fn(NodeId) -> bool,
 ) -> ! {
     has_messages.notified().await;
     log::trace!("starting congestion control worker");
+    let mut backoff = MIN_BACKOFF;
     loop {
         let queues: Vec<(EnvironmentId, ProcessId)> = buf_rx
             .iter()
@@ -109,7 +117,9 @@ async fn forward_messages(
                     .collect::<Vec<_>>()
             })
             .collect();
+        let mut progressed = false;
         let mut disconnected = vec![];
+        let mut gone_nodes = vec![];
         for key in queues {
             let finished = if let Some(msg_ctx) = in_progress.get(&key) {
                 // Chunk data using offset
@@ -130,37 +140,35 @@ async fn forward_messages(
                     chunk_id,
                     data,
                 };
-                if let Some(node_queue) = nodes_queues.get(&msg_ctx.node) {
-                    match node_queue.try_send(chunk) {
-                        Ok(_) => {
-                            log::trace!(
-                                "congestion::chunk::sent message_id={} chunk_id={chunk_id}",
-                                msg_ctx.message_id.0
-                            );
-                            // Move to next chunk
-                            msg_ctx
-                                .offset
-                                .store(offset + CHUNK_SIZE, atomic::Ordering::Relaxed);
-                            msg_ctx
-                                .chunk_id
-                                .store(chunk_id + 1, atomic::Ordering::Relaxed);
-                            finished
-                        }
-                        // The connection manager is behind, retry the chunk on the next pass.
-                        Err(TrySendError::Full(_)) => false,
-                        Err(e) => {
-                            log::warn!(
-                                "Cannot send next chunk from pid={} to node={} dest_pid={}, reason: {e}",
-                                msg_ctx.src.0,
-                                msg_ctx.node.0,
-                                msg_ctx.dest.0,
-                            );
-                            // Without a connection manager the message can't be sent anymore.
-                            true
-                        }
-                    }
+                let sent = nodes_queues
+                    .get(&msg_ctx.node)
+                    .is_some_and(|node_queue| node_queue.try_send(chunk).is_ok());
+                if sent {
+                    log::trace!(
+                        "congestion::chunk::sent message_id={} chunk_id={chunk_id}",
+                        msg_ctx.message_id.0
+                    );
+                    // Move to next chunk
+                    msg_ctx
+                        .offset
+                        .store(offset + CHUNK_SIZE, atomic::Ordering::Relaxed);
+                    msg_ctx
+                        .chunk_id
+                        .store(chunk_id + 1, atomic::Ordering::Relaxed);
+                    progressed = true;
+                    finished
+                } else if node_is_gone(msg_ctx.node) {
+                    log::warn!(
+                        "Dropping message from pid={} to node={} dest_pid={}: the node is gone",
+                        msg_ctx.src.0,
+                        msg_ctx.node.0,
+                        msg_ctx.dest.0,
+                    );
+                    gone_nodes.push(msg_ctx.node);
+                    progressed = true;
+                    true
                 } else {
-                    log::error!("Connection to node={} does not exist", msg_ctx.node.0);
+                    // The node's connection is behind or not there yet, retry on a later pass.
                     false
                 }
             } else {
@@ -179,6 +187,7 @@ async fn forward_messages(
                             new_msg_ctx.message_id.0
                         );
                         in_progress.insert((new_msg_ctx.env, new_msg_ctx.src), new_msg_ctx);
+                        progressed = true;
                     }
                     // Process finished clean up
                     Some(Err(TryRecvError::Disconnected)) => disconnected.push(key),
@@ -193,13 +202,26 @@ async fn forward_messages(
                 env.remove(&pid);
             }
         }
+        // Stops the connection managers of gone nodes.
+        for node in gone_nodes {
+            nodes_queues.remove(&node);
+        }
         // Only wait to be woken up by the next message after a full pass found nothing to send.
         // Waiting in the middle of a pass would miss messages queued for the processes that were
         // already passed.
         if in_progress.is_empty() {
+            backoff = MIN_BACKOFF;
             has_messages.notified().await;
-        } else {
+        } else if progressed {
+            backoff = MIN_BACKOFF;
             tokio::task::yield_now().await;
+        } else {
+            // Every message in progress waits for its node's connection. Back off instead of
+            // passing over them again and again.
+            tokio::time::timeout(backoff, has_messages.notified())
+                .await
+                .ok();
+            backoff = (backoff * 2).min(MAX_BACKOFF);
         }
     }
 }
@@ -234,6 +256,11 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
     let (dead_stream_notifier, mut dead_stream_waker) = mpsc::channel::<()>(1);
 
     loop {
+        // The node is gone when the congestion control worker freed its queue.
+        if manager.message_chunks.is_closed() {
+            stop_connection_manager(&node_info, &mut manager.message_chunks);
+            return Ok(());
+        }
         // Setup conn or fail
         let conn = match manager
             .client
@@ -273,9 +300,14 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
             })));
         }
         // Working chunk passing loop
+        let mut node_is_gone = false;
         'forward_chunks: loop {
             tokio::select! {
-                Some(chunk) = manager.message_chunks.recv() => {
+                chunk = manager.message_chunks.recv() => {
+                    let Some(chunk) = chunk else {
+                        node_is_gone = true;
+                        break 'forward_chunks;
+                    };
                     log::trace!("congestion::node_connection_manager::msg_id {}", chunk.message_id);
                     let src = chunk.src.0;
                     let dest = chunk.dest.0;
@@ -300,7 +332,29 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
         for task in stream_tasks {
             task.await.ok();
         }
+        if node_is_gone {
+            stop_connection_manager(&node_info, &mut manager.message_chunks);
+            return Ok(());
+        }
     }
+}
+
+// Drops the chunks still queued for a gone node.
+fn stop_connection_manager(node_info: &NodeInfo, message_chunks: &mut Receiver<MessageChunk>) {
+    let mut dropped = 0;
+    while message_chunks.try_recv().is_ok() {
+        dropped += 1;
+    }
+    if dropped > 0 {
+        log::warn!(
+            "Dropping {dropped} message chunks to node={}: the node is gone",
+            node_info.id
+        );
+    }
+    log::trace!(
+        "congestion::node_connection_manager::stopped node={}",
+        node_info.id
+    );
 }
 
 struct StreamTask {
@@ -349,7 +403,11 @@ async fn stream_task(mut state: StreamTask) {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::atomic::{AtomicU64, AtomicUsize},
+        collections::HashSet,
+        sync::{
+            atomic::{AtomicU64, AtomicUsize},
+            Mutex,
+        },
         thread,
         time::Duration,
     };
@@ -358,6 +416,7 @@ mod tests {
     use crate::distributed::client::MessageId;
 
     const NODE: NodeId = NodeId(1);
+    const OTHER_NODE: NodeId = NodeId(2);
 
     #[derive(Default)]
     struct Queues {
@@ -365,6 +424,9 @@ mod tests {
         in_progress: DashMap<(EnvironmentId, ProcessId), MessageCtx>,
         nodes_queues: DashMap<NodeId, Sender<MessageChunk>>,
         has_messages: Notify,
+        gone_nodes: Mutex<HashSet<NodeId>>,
+        // How often the worker checked whether a node is gone.
+        gone_checks: AtomicUsize,
     }
 
     impl Queues {
@@ -385,6 +447,12 @@ mod tests {
                     &forwarding.in_progress,
                     &forwarding.nodes_queues,
                     &forwarding.has_messages,
+                    |node| {
+                        forwarding
+                            .gone_checks
+                            .fetch_add(1, atomic::Ordering::Relaxed);
+                        forwarding.gone_nodes.lock().unwrap().contains(&node)
+                    },
                 )
                 .await
             });
@@ -403,18 +471,22 @@ mod tests {
 
         // Queues a single-chunk message, the way `Client::new_message` does.
         async fn send(&self, queue: &Sender<MessageCtx>, env: u64, pid: u64, message_id: u64) {
-            let message = MessageCtx {
-                message_id: MessageId(message_id),
-                env: EnvironmentId(env),
-                src: ProcessId(pid),
-                node: NODE,
-                dest: ProcessId(0),
-                chunk_id: AtomicU64::new(0),
-                offset: AtomicUsize::new(0),
-                data: bytes::Bytes::from_static(b"message"),
-            };
-            assert!(queue.send(message).await.is_ok());
+            assert!(queue.send(message(env, pid, message_id)).await.is_ok());
             self.has_messages.notify_one();
+        }
+    }
+
+    // A single-chunk message to `NODE`.
+    fn message(env: u64, pid: u64, message_id: u64) -> MessageCtx {
+        MessageCtx {
+            message_id: MessageId(message_id),
+            env: EnvironmentId(env),
+            src: ProcessId(pid),
+            node: NODE,
+            dest: ProcessId(0),
+            chunk_id: AtomicU64::new(0),
+            offset: AtomicUsize::new(0),
+            data: bytes::Bytes::from_static(b"message"),
         }
     }
 
@@ -483,5 +555,98 @@ mod tests {
         ];
         message_ids.sort();
         assert_eq!(message_ids, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn messages_wait_for_their_nodes_connection() {
+        let (queues, mut chunks) = Queues::start();
+        let unconnected = queues.queue(0, 1);
+        let message = MessageCtx {
+            node: OTHER_NODE,
+            ..message(0, 1, 1)
+        };
+        assert!(unconnected.send(message).await.is_ok());
+        queues.has_messages.notify_one();
+
+        // Other nodes' messages are still sent.
+        let connected = queues.queue(0, 2);
+        queues.send(&connected, 0, 2, 2).await;
+        assert_eq!(next_chunk(&mut chunks).await.message_id, 2);
+
+        // The worker backs off while waiting for the connection, instead of spinning.
+        let checks = queues.gone_checks.load(atomic::Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let checks = queues.gone_checks.load(atomic::Ordering::Relaxed) - checks;
+        assert!(checks < 50, "checked the node {checks} times");
+
+        // The message is sent once the node is connected.
+        let (sender, mut other_chunks) = mpsc::channel(100);
+        queues.nodes_queues.insert(OTHER_NODE, sender);
+        assert_eq!(next_chunk(&mut other_chunks).await.message_id, 1);
+    }
+
+    #[tokio::test]
+    async fn messages_to_gone_nodes_are_dropped() {
+        let (queues, mut chunks) = Queues::start();
+        // The connection to the other node is stuck with a full queue.
+        let (sender, mut other_chunks) = mpsc::channel(1);
+        assert!(sender.try_send(message_chunk()).is_ok());
+        queues.nodes_queues.insert(OTHER_NODE, sender);
+        queues.gone_nodes.lock().unwrap().insert(OTHER_NODE);
+
+        let to_gone_node = queues.queue(0, 1);
+        let message = MessageCtx {
+            node: OTHER_NODE,
+            ..message(0, 1, 1)
+        };
+        assert!(to_gone_node.send(message).await.is_ok());
+        queues.has_messages.notify_one();
+        let connected = queues.queue(0, 2);
+        queues.send(&connected, 0, 2, 2).await;
+
+        assert_eq!(next_chunk(&mut chunks).await.message_id, 2);
+        assert!(queues.in_progress.is_empty());
+        // The gone node's connection is freed, which stops its connection manager.
+        assert!(!queues.nodes_queues.contains_key(&OTHER_NODE));
+        assert!(other_chunks.recv().await.is_some());
+        assert!(other_chunks.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn connection_managers_of_gone_nodes_stop() {
+        let certified = rcgen::generate_simple_self_signed(vec!["node".to_string()]).unwrap();
+        let cert = certified.cert.pem();
+        let client =
+            quic::new_quic_client(&cert, &cert, &certified.signing_key.serialize_pem()).unwrap();
+        let (sender, message_chunks) = mpsc::channel(10);
+        assert!(sender.try_send(message_chunk()).is_ok());
+        // The congestion control worker freed the queue.
+        drop(sender);
+
+        let manager = node_connection_manager(NodeConnectionManager {
+            streams: 10,
+            node_info: NodeInfo {
+                id: OTHER_NODE.0,
+                address: "127.0.0.1:1".parse().unwrap(),
+                name: "node".to_string(),
+            },
+            client,
+            message_chunks,
+        });
+        tokio::time::timeout(Duration::from_secs(5), manager)
+            .await
+            .expect("the connection manager kept running")
+            .unwrap();
+    }
+
+    fn message_chunk() -> MessageChunk {
+        MessageChunk {
+            src: ProcessId(0),
+            dest: ProcessId(0),
+            message_id: 0,
+            message_size: 0,
+            chunk_id: 0,
+            data: bytes::Bytes::new(),
+        }
     }
 }
