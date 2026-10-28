@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     sync::{
         atomic::{self, AtomicU64, AtomicUsize},
         Arc,
@@ -21,6 +22,8 @@ use crate::{
     distributed::message::{Request, ResponseContent, Spawn},
     quic,
 };
+
+use lunatic_process::{Process, Signal};
 
 use super::message::Response;
 
@@ -78,6 +81,26 @@ pub struct BufTx {
     pub(crate) finished: bool,
 }
 
+/// A process monitoring a process on another node, as tracked on either node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RemoteMonitor {
+    pub env: EnvironmentId,
+    // The other node.
+    pub node: NodeId,
+    pub monitoring: ProcessId,
+    pub process: ProcessId,
+}
+
+// A local process, and the processes on other nodes it monitors.
+struct RemoteMonitors {
+    monitoring_process: Arc<dyn Process>,
+    monitored: HashSet<(NodeId, ProcessId)>,
+}
+
+// IDs of the stand-ins for monitoring processes on other nodes, which can't clash with the IDs of
+// local processes.
+const FIRST_MONITOR_PROXY_ID: u64 = 1 << 63;
+
 // The response to a message, while it's awaited.
 pub struct IncomingResponse {
     content: AsyncCell<ResponseContent>,
@@ -118,6 +141,13 @@ pub struct Inner {
     pub has_messages: Arc<Notify>,
     // Changes whenever a node leaves the cluster.
     membership: watch::Sender<()>,
+    // The local processes monitoring processes on other nodes.
+    remote_monitors: DashMap<(EnvironmentId, ProcessId), RemoteMonitors>,
+    // The local processes monitored by processes on other nodes, keyed by the node of the
+    // monitoring process. Holds the ID of the stand-in for the monitoring process, and the
+    // monitored process.
+    monitor_proxies: DashMap<RemoteMonitor, (u64, Arc<dyn Process>)>,
+    next_monitor_proxy_id: AtomicU64,
 }
 
 impl Client {
@@ -137,6 +167,9 @@ impl Client {
                 response_tx: send,
                 has_messages: Arc::new(Notify::new()),
                 membership: watch::Sender::new(()),
+                remote_monitors: DashMap::new(),
+                monitor_proxies: DashMap::new(),
+                next_monitor_proxy_id: AtomicU64::new(FIRST_MONITOR_PROXY_ID),
             }),
         };
         let inner = Arc::downgrade(&client.inner);
@@ -202,6 +235,39 @@ impl Client {
         Ok(message_id)
     }
 
+    // Queues a message without waiting, for callers that can't wait. A message to a node without
+    // a connection waits for one.
+    pub(crate) fn queue_message(
+        &self,
+        env: EnvironmentId,
+        src: ProcessId,
+        node: NodeId,
+        dest: ProcessId,
+        data: Bytes,
+    ) {
+        let tx = message_queue(&self.inner.buf_tx, &self.inner.buf_rx, env, src);
+        let message = MessageCtx {
+            message_id: self.next_message_id(),
+            env,
+            src,
+            node,
+            dest,
+            offset: AtomicUsize::new(0),
+            chunk_id: AtomicU64::new(0),
+            data,
+        };
+        if tx.try_send(message).is_err() {
+            log::error!("lunatic::distributed::client::queue_message");
+        }
+        self.inner.has_messages.notify_one();
+        if !self.inner.nodes_queues.contains_key(&node) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let client = self.clone();
+                runtime.spawn(async move { client.connect(node).await });
+            }
+        }
+    }
+
     // Makes sure that a connection manager forwards the messages for `node`, unless the node is
     // down. Then the congestion control worker drops its messages.
     async fn connect(&self, node: NodeId) -> Result<()> {
@@ -247,10 +313,181 @@ impl Client {
         }
     }
 
-    /// Removes the message queue of a finished process, once its queued messages were sent.
+    /// Stops the remote monitors of a finished process, and removes its message queue once its
+    /// queued messages were sent.
     pub fn remove_process_resources(&self, env: EnvironmentId, process_id: ProcessId) {
+        if let Some((_, monitors)) = self.inner.remote_monitors.remove(&(env, process_id)) {
+            for (node, process) in monitors.monitored {
+                self.send_stop_monitoring(RemoteMonitor {
+                    env,
+                    node,
+                    monitoring: process_id,
+                    process,
+                });
+            }
+        }
         finish_queue(&self.inner.buf_tx, env, process_id);
         self.inner.has_messages.notify_one();
+    }
+
+    /// `monitoring_process` monitors `monitor.process` on `monitor.node`. It's sent a
+    /// `Signal::ProcessDied` once the monitored process dies for any reason, after the messages
+    /// the monitored process sent it. Also if the process doesn't exist, or its node goes down.
+    pub fn monitor(&self, monitor: RemoteMonitor, monitoring_process: Arc<dyn Process>) {
+        self.inner
+            .remote_monitors
+            .entry((monitor.env, monitor.monitoring))
+            .or_insert_with(|| RemoteMonitors {
+                monitoring_process,
+                monitored: HashSet::new(),
+            })
+            .monitored
+            .insert((monitor.node, monitor.process));
+        // Checked after registering, so that the node going down meanwhile isn't missed.
+        if !self.node_is_gone(monitor.node) {
+            self.send_monitor(monitor);
+            return;
+        }
+        // The node may have joined since the node list was refreshed.
+        let client = self.clone();
+        tokio::spawn(async move {
+            client.inner.control_client.refresh_nodes().await.ok();
+            if client.node_is_gone(monitor.node) {
+                client.remote_process_died(monitor);
+            } else {
+                client.send_monitor(monitor);
+            }
+        });
+    }
+
+    pub fn stop_monitoring(&self, monitor: RemoteMonitor) {
+        let stopped = self
+            .inner
+            .remote_monitors
+            .get_mut(&(monitor.env, monitor.monitoring))
+            .is_some_and(|mut monitors| {
+                monitors.monitored.remove(&(monitor.node, monitor.process))
+            });
+        if stopped {
+            self.send_stop_monitoring(monitor);
+        }
+    }
+
+    fn send_monitor(&self, monitor: RemoteMonitor) {
+        let request = Request::Monitor {
+            node_id: self.node_id.0,
+            environment_id: monitor.env.0,
+            monitoring_process_id: monitor.monitoring.0,
+            process_id: monitor.process.0,
+        };
+        self.queue_request(monitor, request);
+    }
+
+    fn send_stop_monitoring(&self, monitor: RemoteMonitor) {
+        let request = Request::StopMonitoring {
+            node_id: self.node_id.0,
+            environment_id: monitor.env.0,
+            monitoring_process_id: monitor.monitoring.0,
+            process_id: monitor.process.0,
+        };
+        self.queue_request(monitor, request);
+    }
+
+    // Queues a monitoring request from the monitoring process to the monitored one.
+    fn queue_request(&self, monitor: RemoteMonitor, request: Request) {
+        let data = match rmp_serde::to_vec(&request) {
+            Ok(data) => data,
+            Err(_) => unreachable!("lunatic::distributed::client::monitor serialize_message"),
+        };
+        self.queue_message(
+            monitor.env,
+            monitor.monitoring,
+            monitor.node,
+            monitor.process,
+            data.into(),
+        );
+    }
+
+    /// The monitored process of a `monitor` died, or its node went down.
+    pub fn remote_process_died(&self, monitor: RemoteMonitor) {
+        let monitoring_process = self
+            .inner
+            .remote_monitors
+            .get_mut(&(monitor.env, monitor.monitoring))
+            .and_then(|mut monitors| {
+                monitors
+                    .monitored
+                    .remove(&(monitor.node, monitor.process))
+                    .then(|| monitors.monitoring_process.clone())
+            });
+        if let Some(monitoring_process) = monitoring_process {
+            monitoring_process.send(Signal::ProcessDied(monitor.process.0));
+        }
+    }
+
+    /// Registers a stand-in for a process on `monitor.node` monitoring the local process
+    /// `monitored_process`, to be sent to the monitored process with `Signal::Monitor`.
+    pub fn monitor_proxy(
+        &self,
+        monitor: RemoteMonitor,
+        monitored_process: Arc<dyn Process>,
+    ) -> Arc<dyn Process> {
+        // Monitoring a process again keeps the stand-in.
+        let id = match self.inner.monitor_proxies.entry(monitor) {
+            Entry::Occupied(proxy) => proxy.get().0,
+            Entry::Vacant(entry) => {
+                let id = self
+                    .inner
+                    .next_monitor_proxy_id
+                    .fetch_add(1, atomic::Ordering::Relaxed);
+                entry.insert((id, monitored_process));
+                id
+            }
+        };
+        Arc::new(MonitorProxy {
+            id,
+            monitor,
+            client: self.clone(),
+        })
+    }
+
+    /// Stops a process on `monitor.node` from monitoring a local process.
+    pub fn remove_monitor_proxy(&self, monitor: RemoteMonitor) {
+        if let Some((_, (id, monitored_process))) = self.inner.monitor_proxies.remove(&monitor) {
+            monitored_process.send(Signal::StopMonitoring { process_id: id });
+        }
+    }
+
+    /// The process monitored through a stand-in died, unless the stand-in already fired.
+    pub fn monitored_process_died(&self, monitor: RemoteMonitor) {
+        if self.inner.monitor_proxies.remove(&monitor).is_some() {
+            self.notify_process_died(monitor);
+        }
+    }
+
+    /// Notifies the monitoring process on `monitor.node` that the local process
+    /// `monitor.process` died, after the messages the process sent it: the notice goes through
+    /// the process' own message queue.
+    pub fn notify_process_died(&self, monitor: RemoteMonitor) {
+        let request = Request::ProcessDied {
+            node_id: self.node_id.0,
+            environment_id: monitor.env.0,
+            monitoring_process_id: monitor.monitoring.0,
+            process_id: monitor.process.0,
+        };
+        let data = match rmp_serde::to_vec(&request) {
+            Ok(data) => data,
+            Err(_) => unreachable!("lunatic::distributed::client::monitor serialize_message"),
+        };
+        self.queue_message(
+            monitor.env,
+            monitor.process,
+            monitor.node,
+            monitor.monitoring,
+            data.into(),
+        );
+        // The process is dead, so the queue can go once the notice was sent.
+        finish_queue(&self.inner.buf_tx, monitor.env, monitor.process);
     }
 
     // Send distributed message
@@ -419,6 +656,26 @@ pub(crate) fn remove_queue_if_done(
     }
 }
 
+// Stands in for a process on another node that monitors a local process.
+struct MonitorProxy {
+    id: u64,
+    monitor: RemoteMonitor,
+    client: Client,
+}
+
+impl Process for MonitorProxy {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn send(&self, signal: Signal) {
+        // Monitored processes only send their monitors `Signal::ProcessDied`.
+        if let Signal::ProcessDied(_) = signal {
+            self.client.monitored_process_died(self.monitor);
+        }
+    }
+}
+
 impl Inner {
     // Handles a node leaving the cluster.
     fn node_down(&self, node: NodeId) {
@@ -431,6 +688,32 @@ impl Inner {
             if response.node == node && !response.content.is_set() {
                 response.content.set(node_is_down(node));
             }
+        }
+        // The processes on the node are gone for their monitors.
+        let mut died = Vec::new();
+        for mut monitors in self.remote_monitors.iter_mut() {
+            let monitoring_process = monitors.monitoring_process.clone();
+            monitors.monitored.retain(|&(monitored_node, process)| {
+                if monitored_node == node {
+                    died.push((monitoring_process.clone(), process));
+                }
+                monitored_node != node
+            });
+        }
+        for (monitoring_process, process) in died {
+            monitoring_process.send(Signal::ProcessDied(process.0));
+        }
+        // The node's processes don't monitor local ones anymore.
+        let mut proxies = Vec::new();
+        self.monitor_proxies.retain(|monitor, proxy| {
+            let down = monitor.node == node;
+            if down {
+                proxies.push(proxy.clone());
+            }
+            !down
+        });
+        for (id, monitored_process) in proxies {
+            monitored_process.send(Signal::StopMonitoring { process_id: id });
         }
         self.membership.send_replace(());
     }

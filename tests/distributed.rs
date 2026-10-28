@@ -16,9 +16,11 @@ use tempfile::TempDir;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 // Output lines that mean the scenario failed, on any of the processes.
-const FAILURES: [&str; 4] = [
+const FAILURES: [&str; 6] = [
     "distributed failed",
     "dead process failed",
+    "monitor failed",
+    "node down failed",
     "failed, notifying",
     "Error running wasm",
 ];
@@ -100,56 +102,78 @@ fn free_udp_port() -> (UdpSocket, u16) {
     (socket, port)
 }
 
+// A control, node A, and node B running a guest, which works with processes on node A.
+struct Cluster {
+    output: Output,
+    // Dropped before the directory they run in.
+    _control: Lunatic,
+    node_a: Lunatic,
+    _node_b: Lunatic,
+    _dir: TempDir,
+}
+
+impl Cluster {
+    fn start(wat: &str) -> Self {
+        let dir = TempDir::new().unwrap();
+        let guest = wat::parse_file(Path::new(env!("CARGO_MANIFEST_DIR")).join(wat)).unwrap();
+        std::fs::write(dir.path().join("guest.wasm"), guest).unwrap();
+
+        let (sender, lines) = mpsc::channel();
+        let mut output = Output {
+            lines,
+            seen: Vec::new(),
+            deadline: Instant::now() + TIMEOUT,
+        };
+
+        let control = Lunatic::start(dir.path(), "control", &["control"], &sender);
+        let control_url = output.wait_for("control", "Register URL: ");
+        let control_url = control_url
+            .split("Register URL: ")
+            .nth(1)
+            .unwrap()
+            .to_owned();
+
+        // Hold the ports until both are picked, so that the nodes don't get the same one.
+        let (socket_a, port_a) = free_udp_port();
+        let (socket_b, port_b) = free_udp_port();
+        drop((socket_a, socket_b));
+
+        let node_a = format!("127.0.0.1:{port_a}");
+        let node_a = Lunatic::start(
+            dir.path(),
+            "node A",
+            &["node", "--bind-socket", &node_a, &control_url],
+            &sender,
+        );
+        output.wait_for("node A", "Registration successful");
+
+        let node_b = format!("127.0.0.1:{port_b}");
+        let node_b = Lunatic::start(
+            dir.path(),
+            "node B",
+            &[
+                "node",
+                "--bind-socket",
+                &node_b,
+                "--wasm",
+                "guest.wasm",
+                &control_url,
+            ],
+            &sender,
+        );
+        Self {
+            output,
+            _control: control,
+            node_a,
+            _node_b: node_b,
+            _dir: dir,
+        }
+    }
+}
+
 // Runs the guest `wat` on node B, until it prints `success`.
 fn run_guest(wat: &str, success: &str) {
-    let dir = TempDir::new().unwrap();
-    let guest = wat::parse_file(Path::new(env!("CARGO_MANIFEST_DIR")).join(wat)).unwrap();
-    std::fs::write(dir.path().join("guest.wasm"), guest).unwrap();
-
-    let (sender, lines) = mpsc::channel();
-    let mut output = Output {
-        lines,
-        seen: Vec::new(),
-        deadline: Instant::now() + TIMEOUT,
-    };
-
-    let _control = Lunatic::start(dir.path(), "control", &["control"], &sender);
-    let control_url = output.wait_for("control", "Register URL: ");
-    let control_url = control_url
-        .split("Register URL: ")
-        .nth(1)
-        .unwrap()
-        .to_owned();
-
-    // Hold the ports until both are picked, so that the nodes don't get the same one.
-    let (socket_a, port_a) = free_udp_port();
-    let (socket_b, port_b) = free_udp_port();
-    drop((socket_a, socket_b));
-
-    let node_a = format!("127.0.0.1:{port_a}");
-    let _node_a = Lunatic::start(
-        dir.path(),
-        "node A",
-        &["node", "--bind-socket", &node_a, &control_url],
-        &sender,
-    );
-    output.wait_for("node A", "Registration successful");
-
-    let node_b = format!("127.0.0.1:{port_b}");
-    let _node_b = Lunatic::start(
-        dir.path(),
-        "node B",
-        &[
-            "node",
-            "--bind-socket",
-            &node_b,
-            "--wasm",
-            "guest.wasm",
-            &control_url,
-        ],
-        &sender,
-    );
-    output.wait_for("node B", success);
+    Cluster::start(wat).output.wait_for("node B", success);
 }
 
 // Spawns processes on the other node and exchanges messages with them (`wat/distributed.wat`).
@@ -163,4 +187,32 @@ fn nodes_spawn_processes_on_each_other() {
 #[test]
 fn messages_to_dead_processes_are_dropped() {
     run_guest("wat/dead_process.wat", "dead process ok");
+}
+
+// Monitors of processes on another node fire after the messages the processes sent, and for
+// processes that finished or never existed (`wat/monitor.wat`).
+#[test]
+fn remote_monitors_fire_after_the_last_message() {
+    run_guest("wat/monitor.wat", "monitor ok");
+}
+
+// A node that crashes leaves the cluster within its lease, and monitors of its processes fire
+// (`wat/node_down.wat`).
+#[test]
+fn crashed_nodes_leave_the_cluster() {
+    let mut cluster = Cluster::start("wat/node_down.wat");
+    cluster.output.wait_for("node B", "monitoring");
+
+    // `Child::kill` sends SIGKILL, so node A can't tell the control it's leaving.
+    cluster.node_a.0.kill().unwrap();
+    let killed = Instant::now();
+    cluster.output.wait_for("node B", "left the cluster");
+    // The 5s lease, plus up to a second for node B to refresh its node list.
+    let left_after = killed.elapsed();
+    assert!(
+        left_after < Duration::from_secs(8),
+        "node A left the cluster {:?} after it was killed",
+        left_after
+    );
+    cluster.output.wait_for("node B", "node down ok");
 }

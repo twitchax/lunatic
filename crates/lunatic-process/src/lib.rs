@@ -399,6 +399,7 @@ where
     };
 
     env.remove_process(id);
+    add_late_monitors(&mut signal_mailbox, &mut monitors);
 
     let result = match result {
         Finished::Normal(result) => {
@@ -457,6 +458,27 @@ where
     }
 
     result
+}
+
+// Monitors that arrived after the process finished are notified too. Signals sent after the
+// mailbox is closed are lost, but by then the process isn't in its environment anymore, which
+// monitors check for.
+fn add_late_monitors(
+    signal_mailbox: &mut UnboundedReceiver<Signal>,
+    monitors: &mut HashMap<u64, Arc<dyn Process>>,
+) {
+    signal_mailbox.close();
+    while let Ok(signal) = signal_mailbox.try_recv() {
+        match signal {
+            Signal::Monitor(proc) => {
+                monitors.insert(proc.id(), proc);
+            }
+            Signal::StopMonitoring { process_id } => {
+                monitors.remove(&process_id);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A process spawned from a native Rust closure.
@@ -566,4 +588,34 @@ pub enum ResultValue {
     Ok,
     Failed(String),
     SpawnError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(id: u64) -> Arc<dyn Process> {
+        let (signal_mailbox, _) = unbounded_channel();
+        Arc::new(NativeProcess { id, signal_mailbox })
+    }
+
+    #[test]
+    fn monitors_that_arrive_after_the_process_finished_are_notified() {
+        let (sender, mut signal_mailbox) = unbounded_channel();
+        let mut monitors = HashMap::from([(1, process(1))]);
+        for signal in [
+            Signal::Monitor(process(2)),
+            Signal::Monitor(process(3)),
+            Signal::StopMonitoring { process_id: 1 },
+            Signal::StopMonitoring { process_id: 3 },
+            Signal::Kill,
+        ] {
+            sender.send(signal).unwrap();
+        }
+
+        add_late_monitors(&mut signal_mailbox, &mut monitors);
+        assert_eq!(monitors.keys().collect::<Vec<_>>(), vec![&2]);
+        // Later signals are dropped.
+        assert!(sender.send(Signal::Monitor(process(4))).is_err());
+    }
 }

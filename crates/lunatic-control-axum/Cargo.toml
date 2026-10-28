@@ -28,5 +28,6 @@ tokio = { workspace = true, features = ["io-util", "rt", "sync", "time", "fs", "
 uuid = { workspace = true }
 
 [dev-dependencies]
+lunatic-process = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

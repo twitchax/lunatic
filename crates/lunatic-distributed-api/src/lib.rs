@@ -6,7 +6,7 @@ use lunatic_common_api::{get_memory, write_to_guest_vec, IntoTrap, LinkerExt};
 use lunatic_distributed::{
     distributed::{
         self,
-        client::{EnvironmentId, NodeId, ProcessId, SendParams, SpawnParams},
+        client::{EnvironmentId, NodeId, ProcessId, RemoteMonitor, SendParams, SpawnParams},
         message::{ClientError, ResponseContent, Spawn, Val},
     },
     CertAttrs, DistributedCtx, SUBJECT_DIR_ATTRS,
@@ -15,6 +15,7 @@ use lunatic_error_api::ErrorCtx;
 use lunatic_process::{
     env::Environment,
     message::{DataMessage, Message},
+    WasmProcess,
 };
 use lunatic_process_api::ProcessCtx;
 use rcgen::{CertificateSigningRequestParams, CustomExtension};
@@ -32,6 +33,8 @@ where
     linker.func_wrap_anyhow("lunatic::distributed", "get_nodes", get_nodes)?;
     linker.func_wrap("lunatic::distributed", "node_id", node_id)?;
     linker.func_wrap("lunatic::distributed", "module_id", module_id)?;
+    linker.func_wrap_anyhow("lunatic::distributed", "monitor", monitor)?;
+    linker.func_wrap_anyhow("lunatic::distributed", "stop_monitoring", stop_monitoring)?;
     linker.func_wrap_async_anyhow("lunatic::distributed", "spawn", spawn)?;
     linker.func_wrap_async_anyhow("lunatic::distributed", "send", send)?;
     linker.func_wrap_async_anyhow(
@@ -646,6 +649,57 @@ where
             Err(anyhow!("Only Message::Data can be sent across nodes."))
         }
     })
+}
+
+// Monitors the process `process_id` on node `node_id`. When it dies for any reason, this process
+// receives a `ProcessDied` message after the messages the process sent it. It's also received if
+// the process doesn't exist, or once its node goes down.
+//
+// Traps:
+// * If the process isn't distributed.
+fn monitor<T, E>(caller: Caller<T>, node_id: u64, process_id: u64) -> Result<()>
+where
+    T: DistributedCtx<E>,
+    E: Environment,
+{
+    let state = caller.data();
+    let this_process = WasmProcess::new(state.id(), state.signal_mailbox().0.clone());
+    state.distributed()?.node_client.monitor(
+        remote_monitor(state, node_id, process_id),
+        Arc::new(this_process),
+    );
+    Ok(())
+}
+
+// Stops monitoring the process `process_id` on node `node_id`.
+//
+// Traps:
+// * If the process isn't distributed.
+fn stop_monitoring<T, E>(caller: Caller<T>, node_id: u64, process_id: u64) -> Result<()>
+where
+    T: DistributedCtx<E>,
+    E: Environment,
+{
+    let state = caller.data();
+    state
+        .distributed()?
+        .node_client
+        .stop_monitoring(remote_monitor(state, node_id, process_id));
+    Ok(())
+}
+
+// This process monitoring the process `process_id` on node `node_id`.
+fn remote_monitor<T, E>(state: &T, node_id: u64, process_id: u64) -> RemoteMonitor
+where
+    T: DistributedCtx<E>,
+    E: Environment,
+{
+    RemoteMonitor {
+        env: EnvironmentId(state.environment_id()),
+        node: NodeId(node_id),
+        monitoring: ProcessId(state.id()),
+        process: ProcessId(process_id),
+    }
 }
 
 // Returns the id of the node that the current process is running on

@@ -19,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    client::{Client, NodeId, ResponseParams},
+    client::{Client, EnvironmentId, NodeId, ProcessId, RemoteMonitor, ResponseParams},
     message::{ClientError, ResponseContent, Spawn},
 };
 
@@ -119,6 +119,21 @@ where
             process_id: _,
             tag: _,
             data: _,
+        } => Some((*node_id, *environment_id)),
+        Request::Monitor {
+            node_id,
+            environment_id,
+            ..
+        }
+        | Request::StopMonitoring {
+            node_id,
+            environment_id,
+            ..
+        }
+        | Request::ProcessDied {
+            node_id,
+            environment_id,
+            ..
         } => Some((*node_id, *environment_id)),
         Request::Response(_) => None,
     };
@@ -242,8 +257,64 @@ where
             log::trace!("distributed::server process Response");
             ctx.node_client.recv_response(response).await;
         }
+        Request::Monitor {
+            node_id,
+            environment_id,
+            monitoring_process_id,
+            process_id,
+        } => {
+            let monitor =
+                remote_monitor(node_id, environment_id, monitoring_process_id, process_id);
+            let env = ctx.envs.get(environment_id).await;
+            match env.as_ref().and_then(|env| env.get_process(process_id)) {
+                Some(process) => {
+                    let proxy = ctx.node_client.monitor_proxy(monitor, process.clone());
+                    process.send(Signal::Monitor(proxy));
+                    // The process may have finished before it got to the monitor, and notified
+                    // its monitors without it.
+                    if env.and_then(|env| env.get_process(process_id)).is_none() {
+                        ctx.node_client.monitored_process_died(monitor);
+                    }
+                }
+                None => ctx.node_client.notify_process_died(monitor),
+            }
+        }
+        Request::StopMonitoring {
+            node_id,
+            environment_id,
+            monitoring_process_id,
+            process_id,
+        } => {
+            let monitor =
+                remote_monitor(node_id, environment_id, monitoring_process_id, process_id);
+            ctx.node_client.remove_monitor_proxy(monitor);
+        }
+        Request::ProcessDied {
+            node_id,
+            environment_id,
+            monitoring_process_id,
+            process_id,
+        } => {
+            let monitor =
+                remote_monitor(node_id, environment_id, monitoring_process_id, process_id);
+            ctx.node_client.remote_process_died(monitor);
+        }
     };
     Ok(())
+}
+
+fn remote_monitor(
+    node_id: u64,
+    environment_id: u64,
+    monitoring_process_id: u64,
+    process_id: u64,
+) -> RemoteMonitor {
+    RemoteMonitor {
+        env: EnvironmentId(environment_id),
+        node: NodeId(node_id),
+        monitoring: ProcessId(monitoring_process_id),
+        process: ProcessId(process_id),
+    }
 }
 
 async fn handle_spawn<T, E>(ctx: ServerCtx<T, E>, spawn: Spawn) -> Result<Result<u64, ClientError>>

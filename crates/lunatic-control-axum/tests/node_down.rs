@@ -1,18 +1,20 @@
 //! A node's requests to another node fail once the other node leaves the cluster.
 
-use std::{collections::HashMap, net::TcpListener, time::Duration};
+use std::{collections::HashMap, net::TcpListener, sync::Arc, time::Duration};
 
 use lunatic_control_axum::server::control_server_from_tcp;
 use lunatic_distributed::{
     control,
     distributed::{
         self,
-        client::{EnvironmentId, MessageId, NodeId, ProcessId, SpawnParams},
+        client::{EnvironmentId, MessageId, NodeId, ProcessId, RemoteMonitor, SpawnParams},
         message::{ClientError, ResponseContent, Spawn},
         server::gen_node_cert,
     },
     quic,
 };
+use lunatic_process::{Process, Signal};
+use tokio::sync::mpsc::UnboundedReceiver;
 use uuid::Uuid;
 
 // Registers and starts a node with the control server at `control_url`.
@@ -105,4 +107,116 @@ async fn requests_fail_when_their_node_goes_down() {
         .expect("the request waited for a node that's down")
         .unwrap();
     assert!(is_node_down(&response), "{response:?}");
+}
+
+// A process that forwards the signals it's sent.
+struct SignalRecorder {
+    id: u64,
+    signals: tokio::sync::mpsc::UnboundedSender<Signal>,
+}
+
+impl Process for SignalRecorder {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn send(&self, signal: Signal) {
+        self.signals.send(signal).ok();
+    }
+}
+
+fn signal_recorder(id: u64) -> (Arc<dyn Process>, UnboundedReceiver<Signal>) {
+    let (signals, recorded) = tokio::sync::mpsc::unbounded_channel();
+    (Arc::new(SignalRecorder { id, signals }), recorded)
+}
+
+async fn process_died(signals: &mut UnboundedReceiver<Signal>) -> u64 {
+    let signal = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+        .await
+        .expect("the monitor didn't fire")
+        .unwrap();
+    match signal {
+        Signal::ProcessDied(process_id) => process_id,
+        signal => panic!("unexpected signal {signal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn remote_monitors_fire_when_their_node_goes_down() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let control_url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(control_server_from_tcp(listener));
+    let (leaving, _) = start_node(&control_url).await;
+    let (_, node_client) = start_node(&control_url).await;
+    let monitor = |monitoring: u64, process: u64| RemoteMonitor {
+        env: EnvironmentId(1),
+        node: NodeId(leaving.node_id()),
+        monitoring: ProcessId(monitoring),
+        process: ProcessId(process),
+    };
+
+    let (monitoring, mut signals) = signal_recorder(1);
+    node_client.monitor(monitor(1, 7), monitoring);
+    let (stopped, mut stopped_signals) = signal_recorder(2);
+    node_client.monitor(monitor(2, 7), stopped);
+    node_client.stop_monitoring(monitor(2, 7));
+    let (finished, mut finished_signals) = signal_recorder(3);
+    node_client.monitor(monitor(3, 7), finished);
+    node_client.remove_process_resources(EnvironmentId(1), ProcessId(3));
+
+    leaving.notify_node_stopped().await.unwrap();
+    assert_eq!(process_died(&mut signals).await, 7);
+    // A notice of the process' death that comes late doesn't fire the monitor again.
+    node_client.remote_process_died(monitor(1, 7));
+    assert!(signals.try_recv().is_err());
+    // Monitors that were stopped, or whose process finished, don't fire.
+    assert!(stopped_signals.try_recv().is_err());
+    assert!(finished_signals.try_recv().is_err());
+
+    // Monitoring a process on a node that's down fires right away.
+    let (late, mut late_signals) = signal_recorder(4);
+    node_client.monitor(monitor(4, 8), late);
+    assert_eq!(process_died(&mut late_signals).await, 8);
+}
+
+#[tokio::test]
+async fn monitored_processes_notify_their_remote_monitors_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let control_url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(control_server_from_tcp(listener));
+    let (monitoring_node, _) = start_node(&control_url).await;
+    let (_, node_client) = start_node(&control_url).await;
+    let monitor = RemoteMonitor {
+        env: EnvironmentId(1),
+        node: NodeId(monitoring_node.node_id()),
+        monitoring: ProcessId(1),
+        process: ProcessId(7),
+    };
+
+    let (monitored, mut monitored_signals) = signal_recorder(7);
+    let proxy = node_client.monitor_proxy(monitor, monitored.clone());
+    // Monitoring the process again keeps the stand-in.
+    assert_eq!(
+        node_client.monitor_proxy(monitor, monitored).id(),
+        proxy.id()
+    );
+    // The monitored process dies, possibly noticed twice. The first notice removes the
+    // stand-in, so stopping the monitor afterwards has nothing to stop.
+    proxy.send(Signal::ProcessDied(7));
+    node_client.monitored_process_died(monitor);
+    node_client.remove_monitor_proxy(monitor);
+    assert!(monitored_signals.try_recv().is_err());
+
+    // A stopped monitor doesn't notify.
+    let (monitored, mut monitored_signals) = signal_recorder(8);
+    let monitor = RemoteMonitor {
+        process: ProcessId(8),
+        ..monitor
+    };
+    let proxy = node_client.monitor_proxy(monitor, monitored);
+    node_client.remove_monitor_proxy(monitor);
+    match monitored_signals.try_recv() {
+        Ok(Signal::StopMonitoring { process_id }) => assert_eq!(process_id, proxy.id()),
+        signal => panic!("unexpected signal {signal:?}"),
+    }
 }

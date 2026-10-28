@@ -12,6 +12,26 @@ pub enum Request {
         data: Vec<u8>,
     },
     Response(Response),
+    // The process `monitoring_process_id` on node `node_id` monitors the process `process_id`.
+    Monitor {
+        node_id: u64,
+        environment_id: u64,
+        monitoring_process_id: u64,
+        process_id: u64,
+    },
+    StopMonitoring {
+        node_id: u64,
+        environment_id: u64,
+        monitoring_process_id: u64,
+        process_id: u64,
+    },
+    // The process `process_id` on node `node_id`, monitored by `monitoring_process_id`, died.
+    ProcessDied {
+        node_id: u64,
+        environment_id: u64,
+        monitoring_process_id: u64,
+        process_id: u64,
+    },
 }
 
 impl Request {
@@ -20,6 +40,9 @@ impl Request {
             Request::Spawn(_) => "Spawn",
             Request::Message { .. } => "Message",
             Request::Response(_) => "Response",
+            Request::Monitor { .. } => "Monitor",
+            Request::StopMonitoring { .. } => "StopMonitoring",
+            Request::ProcessDied { .. } => "ProcessDied",
         }
     }
 }

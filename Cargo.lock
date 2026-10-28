@@ -2084,6 +2084,7 @@ dependencies = [
  "log",
  "lunatic-control",
  "lunatic-distributed",
+ "lunatic-process",
  "rcgen",
  "reqwest",
  "serde",
