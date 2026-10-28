@@ -17,7 +17,10 @@ pub trait Environment: Send + Sync {
     fn remove_process(&self, id: u64);
     fn process_count(&self) -> usize;
     async fn can_spawn_next_process(&self) -> Result<Option<()>>;
-    fn send(&self, id: u64, signal: Signal);
+    /// Sends `signal` to the process `id` if it's in the environment, and returns whether it was.
+    /// A process handles the `Signal::Monitor`s sent while it's in the environment, even if it
+    /// finished.
+    fn send(&self, id: u64, signal: Signal) -> bool;
 }
 
 #[async_trait]
@@ -78,9 +81,14 @@ impl Environment for LunaticEnvironment {
         self.processes.len()
     }
 
-    fn send(&self, id: u64, signal: Signal) {
-        if let Some(proc) = self.processes.get(&id) {
-            proc.send(signal);
+    fn send(&self, id: u64, signal: Signal) -> bool {
+        // Holding the entry keeps the process from being removed before it got the signal.
+        match self.processes.get(&id) {
+            Some(proc) => {
+                proc.send(signal);
+                true
+            }
+            None => false,
         }
     }
 
@@ -135,6 +143,19 @@ mod tests {
         assert!(Arc::ptr_eq(&env, &envs.create(1).await.unwrap()));
         assert!(Arc::ptr_eq(&env, &envs.get(1).await.unwrap()));
         assert!(!Arc::ptr_eq(&env, &envs.create(2).await.unwrap()));
+    }
+
+    #[test]
+    fn signals_reach_processes_in_the_environment() {
+        let env = LunaticEnvironment::new(1);
+        let (signal_mailbox, mut signals) = tokio::sync::mpsc::unbounded_channel();
+        env.add_process(7, Arc::new(crate::WasmProcess::new(7, signal_mailbox)));
+
+        assert!(env.send(7, Signal::Kill));
+        assert!(matches!(signals.try_recv(), Ok(Signal::Kill)));
+        env.remove_process(7);
+        assert!(!env.send(7, Signal::Kill));
+        assert!(signals.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

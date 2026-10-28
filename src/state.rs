@@ -720,6 +720,54 @@ mod tests {
         );
     }
 
+    // Monitors of processes that don't exist fire right away, after the messages the processes
+    // sent.
+    #[tokio::test]
+    async fn monitors_of_missing_processes_fire() {
+        use lunatic_process_api::ProcessConfigCtx;
+
+        let wat = r#"
+            (module
+                (import "lunatic::process" "monitor" (func $monitor (param i64)))
+                (import "lunatic::process" "spawn"
+                    (func $spawn (param i64 i64 i64 i32 i32 i32 i32 i32) (result i32)))
+                (import "lunatic::process" "process_id" (func $process_id (result i64)))
+                (import "lunatic::process" "sleep_ms" (func $sleep_ms (param i64)))
+                (import "lunatic::message" "create_data" (func $create_data (param i64 i64)))
+                (import "lunatic::message" "send" (func $send (param i64) (result i32)))
+                (import "lunatic::message" "receive"
+                    (func $receive (param i32 i32 i64) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "child")
+                ;; 0 for data, 2 for a monitored process' death.
+                (func $next (result i32)
+                    (call $receive (i32.const 0) (i32.const 0) (i64.const 5000)))
+                (func (export "hello")
+                    ;; A process that never existed.
+                    (call $monitor (i64.const 1000000))
+                    (if (i32.ne (call $next) (i32.const 2)) (then unreachable))
+
+                    ;; A process that messaged this one and finished.
+                    (i32.store8 (i32.const 128) (i32.const 0x7E))
+                    (i64.store (i32.const 129) (call $process_id))
+                    (i64.store (i32.const 137) (i64.const 0))
+                    (if (call $spawn (i64.const 0) (i64.const -1) (i64.const -1)
+                            (i32.const 16) (i32.const 5) (i32.const 128) (i32.const 17)
+                            (i32.const 192))
+                        (then unreachable))
+                    (call $sleep_ms (i64.const 100))
+                    (call $monitor (i64.load (i32.const 192)))
+                    (if (i32.ne (call $next) (i32.const 0)) (then unreachable))
+                    (if (i32.ne (call $next) (i32.const 2)) (then unreachable)))
+                (func (export "child") (param $parent i64)
+                    (call $create_data (i64.const 0) (i64.const 0))
+                    (drop (call $send (local.get $parent)))))
+        "#;
+        let mut config = crate::DefaultProcessConfig::default();
+        config.set_can_spawn_processes(true);
+        spawn_hello(wat, config, None).await.await.unwrap().unwrap();
+    }
+
     // A spawn under a name that fails leaves the name free.
     #[tokio::test]
     async fn failed_named_spawns_dont_register_the_name() {

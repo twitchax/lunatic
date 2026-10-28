@@ -1014,19 +1014,21 @@ fn unlink<T: ProcessState + ProcessCtx<T>>(mut caller: Caller<T>, process_id: u6
     Ok(())
 }
 
-// Start monitoring **process_id**. This is not an atomic operation.
-//
-// Traps:
-// * If the process ID doesn't exist.
+// Start monitoring **process_id**. This process receives a `ProcessDied` message once the
+// process dies, after the messages the process sent it. Right away if the process doesn't exist.
 fn monitor<T: ProcessState + ProcessCtx<T>>(caller: Caller<T>, process_id: u64) -> Result<()> {
-    // Send link signal to other process
-    let process = caller.data().environment().get_process(process_id);
+    let id = caller.data().id();
+    let signal_mailbox = caller.data().signal_mailbox().0.clone();
+    let this_process = WasmProcess::new(id, signal_mailbox.clone());
+    let monitored = caller
+        .data()
+        .environment()
+        .send(process_id, Signal::Monitor(Arc::new(this_process)));
 
-    if let Some(process) = process {
-        let id = caller.data().id();
-        let signal_mailbox = caller.data().signal_mailbox().clone();
-        let this_process = WasmProcess::new(id, signal_mailbox.0);
-        process.send(Signal::Monitor(Arc::new(this_process)));
+    if !monitored {
+        // A local process sends its messages before it leaves its environment, so they're in
+        // this process' signal mailbox already, ahead of the notice.
+        signal_mailbox.send(Signal::ProcessDied(process_id)).ok();
     }
 
     Ok(())
