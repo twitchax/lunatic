@@ -649,4 +649,28 @@ mod tests {
             data: bytes::Bytes::new(),
         }
     }
+
+    #[tokio::test]
+    async fn queues_of_finished_processes_are_removed_after_their_messages() {
+        let (queues, mut chunks) = Queues::start();
+        let queue = queues.queue(0, 1);
+        // A message of three chunks, followed by another message.
+        let long_message = MessageCtx {
+            data: bytes::Bytes::from(vec![0; 2 * CHUNK_SIZE + 1]),
+            ..message(0, 1, 1)
+        };
+        assert!(queue.send(long_message).await.is_ok());
+        queues.send(&queue, 0, 1, 2).await;
+        // Let the worker start forwarding the first message, then the process finishes.
+        tokio::task::yield_now().await;
+        drop(queue);
+
+        let mut chunk_ids = Vec::new();
+        for _ in 0..4 {
+            let chunk = next_chunk(&mut chunks).await;
+            chunk_ids.push((chunk.message_id, chunk.chunk_id));
+        }
+        assert_eq!(chunk_ids, vec![(1, 0), (1, 1), (1, 2), (2, 0)]);
+        assert!(queues.buf_rx.get(&EnvironmentId(0)).unwrap().is_empty());
+    }
 }

@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use hash_map_id::HashMapId;
-use lunatic_distributed::{DistributedCtx, DistributedProcessState};
+use lunatic_distributed::{
+    distributed::client::{EnvironmentId, ProcessId},
+    DistributedCtx, DistributedProcessState,
+};
 use lunatic_error_api::{ErrorCtx, ErrorResource};
 use lunatic_networking_api::{DnsIterator, TlsConnection, TlsListener};
 use lunatic_networking_api::{NetworkingCtx, TcpConnection};
@@ -208,6 +211,18 @@ impl ProcessState for DefaultProcessState {
 
     fn registry(&self) -> &Arc<RwLock<HashMap<String, (u64, u64)>>> {
         &self.registry
+    }
+}
+
+// The queue for the messages a process sends to other nodes goes away when the process does, once
+// the queued messages are sent.
+impl Drop for DefaultProcessState {
+    fn drop(&mut self) {
+        if let Some(distributed) = &self.distributed {
+            distributed
+                .node_client
+                .remove_process_resources(EnvironmentId(self.environment.id()), ProcessId(self.id));
+        }
     }
 }
 
@@ -681,5 +696,89 @@ mod tests {
             value("histo"),
             Some(&DebugValue::Histogram(vec![3.0.into()]))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finished_processes_release_their_message_queue() {
+        use std::{collections::HashMap, net::TcpListener, sync::Arc};
+
+        use lunatic_distributed::{
+            control,
+            distributed::{
+                self,
+                client::{EnvironmentId, NodeId, ProcessId, SendParams},
+                server::gen_node_cert,
+            },
+            quic, DistributedProcessState,
+        };
+        use lunatic_process::{
+            env::{Environment, LunaticEnvironment},
+            runtimes::wasmtime::{default_config, WasmtimeRuntime},
+        };
+
+        use crate::state::DefaultProcessState;
+
+        // A node registered with a control server.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let control_url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(lunatic_control_axum::server::control_server_from_tcp(
+            listener,
+        ));
+        let http_client = reqwest::Client::new();
+        let node_name = uuid::Uuid::new_v4();
+        let (csr, key) = gen_node_cert(&node_name.to_string()).unwrap();
+        let reg = control::Client::register(
+            &http_client,
+            control_url.parse().unwrap(),
+            node_name,
+            csr.pem().unwrap(),
+        )
+        .await
+        .unwrap();
+        let quic_client =
+            quic::new_quic_client(&reg.root_cert, &reg.cert_pem_chain[0], &key.serialize_pem())
+                .unwrap();
+        let node_address = "127.0.0.1:1".parse().unwrap();
+        let control_client = control::Client::new(http_client, reg, node_address, HashMap::new())
+            .await
+            .unwrap();
+        let node_id = control_client.node_id();
+        let node_client = distributed::Client::new(node_id, control_client.clone(), quic_client);
+        let distributed =
+            DistributedProcessState::new(node_id, control_client, node_client.clone())
+                .await
+                .unwrap();
+
+        let runtime = WasmtimeRuntime::new(&default_config()).unwrap();
+        let raw_module = wat::parse_file("./wat/hello.wat").unwrap();
+        let module = Arc::new(runtime.compile_module(raw_module.into()).unwrap());
+        let env = Arc::new(LunaticEnvironment::new(1));
+        let state = DefaultProcessState::new(
+            env.clone(),
+            Some(distributed),
+            runtime,
+            module,
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+
+        // The process sends a message to a process on another node.
+        let queue = (EnvironmentId(env.id()), ProcessId(state.id));
+        node_client
+            .send(SendParams {
+                env: queue.0,
+                src: queue.1,
+                node: NodeId(node_id),
+                dest: ProcessId(1),
+                tag: None,
+                data: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(node_client.inner.buf_tx.contains_key(&queue));
+
+        drop(state);
+        assert!(!node_client.inner.buf_tx.contains_key(&queue));
     }
 }
