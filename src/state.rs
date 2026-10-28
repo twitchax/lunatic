@@ -616,6 +616,30 @@ mod tests {
         assert!(task.await.unwrap().is_err());
     }
 
+    #[tokio::test]
+    async fn requests_to_missing_processes_report_it() {
+        // An untimed request to a process that doesn't exist, trapping unless it returns 1.
+        let wat = r#"
+            (module
+                (import "lunatic::message" "create_data" (func $create_data (param i64 i64)))
+                (import "lunatic::message" "send_receive_skip_search"
+                    (func $send_receive_skip_search (param i64 i64 i64) (result i32)))
+                (func (export "hello")
+                    (call $create_data (i64.const 0) (i64.const 0))
+                    (if (i32.ne (call $send_receive_skip_search
+                            (i64.const 999) (i64.const 1) (i64.const -1))
+                            (i32.const 1))
+                        (then unreachable))))
+        "#;
+        let task = spawn_hello(wat, Default::default(), None).await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .expect("the request waited for a reply")
+            .unwrap()
+            .unwrap();
+    }
+
     #[test]
     fn busy_guest_yields_to_other_tasks() {
         use std::time::Duration;

@@ -500,10 +500,10 @@ fn send<T: ProcessState + ProcessCtx<T>>(mut caller: Caller<T>, process_id: u64)
 //
 // Returns:
 // * 0    if message arrived.
+// * 1    if the process ID doesn't exist, so no reply will ever arrive.
 // * 9027 if call timed out.
 //
 // Traps:
-// * If the process ID doesn't exist.
 // * If it's called with wrong data in the scratch area.
 fn send_receive_skip_search<T: ProcessState + ProcessCtx<T> + Send>(
     mut caller: Caller<T>,
@@ -518,8 +518,9 @@ fn send_receive_skip_search<T: ProcessState + ProcessCtx<T> + Send>(
             .take()
             .or_trap("lunatic::message::send_receive_skip_search")?;
 
-        if let Some(process) = caller.data_mut().environment().get_process(process_id) {
-            process.send(Signal::Message(message));
+        match caller.data_mut().environment().get_process(process_id) {
+            Some(process) => process.send(Signal::Message(message)),
+            None => return Ok(1),
         }
 
         let tags = [wait_on_tag];
