@@ -556,7 +556,7 @@ where
 // Returns:
 // * 0    If message arrived.
 // * 1    If process_id does not exist
-// * 2    If node_id does not exist
+// * 2    If node_id does not exist, or the node went down before the process replied
 // * 9027 If call timed out.
 //
 // Traps:
@@ -608,7 +608,7 @@ where
                 .map_err(|error| anyhow!(error))?;
 
             // Wait for the reply, unless the receiving node reports that the process doesn't
-            // exist: then no reply will ever come.
+            // exist or the node goes down: then no reply will ever come.
             let process_not_found = async {
                 match node_client.await_response(message_id).await {
                     Ok(ResponseContent::Error(ClientError::ProcessNotFound)) => {}
@@ -616,12 +616,14 @@ where
                     _ => std::future::pending().await,
                 }
             };
+            let node_down = node_client.wait_node_down(NodeId(node_id));
             let tags = [wait_on_tag];
             let pop_skip_search = caller.data_mut().mailbox().pop_skip_search(Some(&tags));
             let reply = async {
                 tokio::select! {
-                    message = pop_skip_search => Some(message),
-                    () = process_not_found => None,
+                    message = pop_skip_search => Ok(message),
+                    () = process_not_found => Err(1),
+                    () = node_down => Err(2),
                 }
             };
             let reply = match timeout_duration {
@@ -632,12 +634,12 @@ where
             };
             node_client.forget_response(message_id);
             match reply {
-                Ok(Some(message)) => {
+                Ok(Ok(message)) => {
                     // Put the message into the scratch area
                     caller.data_mut().message_scratch_area().replace(message);
                     Ok(0)
                 }
-                Ok(None) => Ok(1),
+                Ok(Err(code)) => Ok(code),
                 Err(_) => Ok(9027),
             }
         } else {

@@ -12,7 +12,7 @@ use bytes::Bytes;
 use dashmap::{mapref::entry::Entry, DashMap};
 use tokio::sync::{
     mpsc::{Receiver, Sender},
-    Notify,
+    watch, Notify,
 };
 
 use crate::{
@@ -71,7 +71,23 @@ pub struct MessageCtx {
 // Receiving part of the message queue
 pub(crate) type BufRx = Receiver<MessageCtx>;
 
-type IncomingResponse = (AsyncCell<ResponseContent>, Instant);
+// The response to a message, while it's awaited.
+pub struct IncomingResponse {
+    content: AsyncCell<ResponseContent>,
+    sent_at: Instant,
+    // The node the message was sent to.
+    node: NodeId,
+}
+
+impl IncomingResponse {
+    fn new(node: NodeId) -> Self {
+        Self {
+            content: AsyncCell::new(),
+            sent_at: Instant::now(),
+            node,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Client {
@@ -93,6 +109,8 @@ pub struct Inner {
     pub responses: DashMap<MessageId, Arc<IncomingResponse>>,
     pub response_tx: Sender<(MessageId, ResponseContent)>,
     pub has_messages: Arc<Notify>,
+    // Changes whenever a node leaves the cluster.
+    membership: watch::Sender<()>,
 }
 
 impl Client {
@@ -111,8 +129,15 @@ impl Client {
                 responses: DashMap::new(),
                 response_tx: send,
                 has_messages: Arc::new(Notify::new()),
+                membership: watch::Sender::new(()),
             }),
         };
+        let inner = Arc::downgrade(&client.inner);
+        client.inner.control_client.on_node_down(move |node_id| {
+            if let Some(inner) = inner.upgrade() {
+                inner.node_down(NodeId(node_id));
+            }
+        });
         tokio::spawn(congestion::congestion_control_worker(client.clone()));
         tokio::spawn(process_responses(client.clone(), recv));
         client
@@ -161,9 +186,13 @@ impl Client {
         let message_id = self.next_message_id();
         // Register the response before queueing the message, so that it can't arrive first.
         if track_response {
-            self.inner
-                .responses
-                .insert(message_id, Arc::new((AsyncCell::new(), Instant::now())));
+            let response = Arc::new(IncomingResponse::new(node));
+            self.inner.responses.insert(message_id, response.clone());
+            // A node that's down won't respond. If it went down after this check, the response
+            // was already registered to fail.
+            if self.node_is_gone(node) {
+                response.content.set(node_is_down(node));
+            }
         }
         match tx
             .send(MessageCtx {
@@ -188,6 +217,17 @@ impl Client {
     // Whether the control server stopped listing the node, e.g. because the node stopped.
     pub(crate) fn node_is_gone(&self, node: NodeId) -> bool {
         !self.inner.control_client.node_ids().contains(&node.0)
+    }
+
+    /// Returns once `node` is down: it left the cluster, gracefully or because its lease on the
+    /// control server ran out.
+    pub async fn wait_node_down(&self, node: NodeId) {
+        let mut membership = self.inner.membership.subscribe();
+        while !self.node_is_gone(node) {
+            if membership.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
     }
 
     pub fn remove_process_resources(&self, env: EnvironmentId, process_id: ProcessId) {
@@ -294,7 +334,7 @@ async fn take_response(
         .get(&message_id)
         .map(|response| response.clone())
         .ok_or_else(|| anyhow!("message does not exist"))?;
-    let content = response.0.take().await;
+    let content = response.content.take().await;
     responses.remove(&message_id);
     Ok(content)
 }
@@ -321,6 +361,29 @@ fn message_queue(
     }
 }
 
+impl Inner {
+    // Handles a node leaving the cluster.
+    fn node_down(&self, node: NodeId) {
+        // Stop the node's connection manager, which drops the chunks queued for it. The
+        // congestion control worker drops the node's messages in progress.
+        self.nodes_queues.remove(&node);
+        self.has_messages.notify_one();
+        // Fail the requests waiting for the node to respond.
+        for response in self.responses.iter() {
+            if response.node == node && !response.content.is_set() {
+                response.content.set(node_is_down(node));
+            }
+        }
+        self.membership.send_replace(());
+    }
+}
+
+fn node_is_down(node: NodeId) -> ResponseContent {
+    ResponseContent::Error(crate::distributed::message::ClientError::Connection(
+        format!("Node {} is down", node.0),
+    ))
+}
+
 pub async fn process_responses(
     client: Client,
     mut recv: Receiver<(MessageId, ResponseContent)>,
@@ -330,7 +393,7 @@ pub async fn process_responses(
            r =  recv.recv() => {
             if let Some((message_id, response)) = r {
                 if let Some(cell) = client.inner.responses.get(&message_id) {
-                cell.0.set(response);
+                cell.content.set(response);
                 }
             }
            },
@@ -349,14 +412,14 @@ fn expire_responses(responses: &DashMap<MessageId, Arc<IncomingResponse>>, timeo
     // Removing entries while iterating over the map deadlocks on its shard locks, so retain the
     // entries to keep instead.
     responses.retain(|_, response| {
-        let expired = response.1.elapsed() > timeout;
+        let expired = response.sent_at.elapsed() > timeout;
         // Clean up timeouts
-        if expired && response.0.is_set() {
+        if expired && response.content.is_set() {
             return false;
         }
         // Set timeout response
         if expired {
-            response.0.set(ResponseContent::Error(
+            response.content.set(ResponseContent::Error(
                 crate::distributed::message::ClientError::Unexpected(
                     "Response timeout.".to_string(),
                 ),
@@ -414,7 +477,7 @@ mod tests {
         responses
             .get(&MessageId(1))
             .unwrap()
-            .0
+            .content
             .set(ResponseContent::Sent);
         let content = waiter.await.unwrap().unwrap();
         assert!(matches!(content, ResponseContent::Sent));
@@ -450,11 +513,14 @@ mod tests {
     }
 
     fn response(set: bool, age: Duration) -> Arc<IncomingResponse> {
-        let cell = AsyncCell::new();
+        let response = IncomingResponse {
+            sent_at: Instant::now() - age,
+            ..IncomingResponse::new(NodeId(1))
+        };
         if set {
-            cell.set(ResponseContent::Sent);
+            response.content.set(ResponseContent::Sent);
         }
-        Arc::new((cell, Instant::now() - age))
+        Arc::new(response)
     }
 
     #[test]
@@ -479,13 +545,18 @@ mod tests {
         let mut message_ids: Vec<_> = responses.iter().map(|entry| entry.key().0).collect();
         message_ids.sort();
         assert_eq!(message_ids, vec![1, 3, 4]);
-        let timed_out = responses.get(&MessageId(1)).unwrap().0.try_take();
+        let timed_out = responses.get(&MessageId(1)).unwrap().content.try_take();
         assert!(matches!(
             timed_out,
             Some(ResponseContent::Error(
                 crate::distributed::message::ClientError::Unexpected(_)
             ))
         ));
-        assert!(responses.get(&MessageId(3)).unwrap().0.try_take().is_none());
+        assert!(responses
+            .get(&MessageId(3))
+            .unwrap()
+            .content
+            .try_take()
+            .is_none());
     }
 }
