@@ -281,6 +281,8 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
             node_info.name,
             node_info.address
         );
+        // Streams of the previous connection may have reported it dead after the first one did.
+        while dead_stream_waker.try_recv().is_ok() {}
         // Open as many streams as the peer lets us, up to `manager.streams`.
         let mut quic_streams = Vec::with_capacity(manager.streams);
         while quic_streams.len() < manager.streams {
@@ -426,8 +428,9 @@ async fn stream_task(mut state: StreamTask) {
             Err(_) => {
                 // Connection is dead return chunks in order back to the buffer
                 chunks.drain(..).rev().for_each(|c| buffer.push_back(c));
-                // Notify manager that connection has died
-                state.manager_notifier.send(()).await.ok();
+                // Notify manager that connection has died. One notification is enough, and the
+                // manager may already be waiting for this task to finish instead of reading them.
+                state.manager_notifier.try_send(()).ok();
                 break;
             }
         };
@@ -811,5 +814,52 @@ mod tests {
             .expect("the connection manager kept running")
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failing_streams_dont_block_their_manager() {
+        let (server, client) = quic_server(10);
+        let (conn, _server_conn) = tokio::join!(
+            client._connect(server.local_addr().unwrap(), "node"),
+            async { server.accept().await.unwrap().await.unwrap() }
+        );
+        let conn = conn.unwrap();
+        let (dead_stream_notifier, mut dead_stream_waker) = mpsc::channel(1);
+        let mut stream_tasks = Vec::new();
+        let mut buffers = Vec::new();
+        let mut stream_wakers = Vec::new();
+        for _ in 0..3 {
+            let buffer: StreamBuffer = Arc::new(RwLock::new(VecDeque::from([message_chunk()])));
+            let (stream_waker, action) = mpsc::channel(10);
+            stream_tasks.push(tokio::spawn(stream_task(StreamTask {
+                quic_stream: conn.open_uni().await.unwrap(),
+                action,
+                manager_notifier: dead_stream_notifier.clone(),
+                buffer: buffer.clone(),
+            })));
+            buffers.push(buffer);
+            stream_wakers.push(stream_waker);
+        }
+
+        // The connection dies, so that every stream fails to send its chunk.
+        conn.close(0u32.into(), b"");
+        for stream_waker in &stream_wakers {
+            assert!(stream_waker.send(StreamAction::Message).await.is_ok());
+        }
+
+        // Like the manager: one notification, then wait for the stream tasks to finish.
+        tokio::time::timeout(Duration::from_secs(5), dead_stream_waker.recv())
+            .await
+            .unwrap();
+        for stream_task in stream_tasks {
+            tokio::time::timeout(Duration::from_secs(5), stream_task)
+                .await
+                .expect("a stream task blocked")
+                .unwrap();
+        }
+        // The chunks are kept for the next connection.
+        for buffer in buffers {
+            assert_eq!(buffer.read().await.len(), 1);
+        }
     }
 }
