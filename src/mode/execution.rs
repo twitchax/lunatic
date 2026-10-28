@@ -19,7 +19,7 @@ enum Commands {
     /// This command should be run inside the root folder of a cargo project,
     /// containing the Cargo.toml file. It will add configuration options to it
     /// in the `cargo/config.toml` file, setting the compilation target to
-    /// `wasm32-wasi` and the default runner for this target to `lunatic run`.
+    /// `wasm32-wasip1` and the default runner for this target to `lunatic run`.
     Init,
     /// Executes a .wasm file
     Run(super::run::Args),

@@ -7,6 +7,9 @@ use std::{
 use anyhow::{anyhow, Result};
 use toml::{value::Table, Value};
 
+/// The compilation target `lunatic init` configures (`wasm32-wasi` before Rust 1.84).
+pub(crate) const TARGET: &str = "wasm32-wasip1";
+
 pub(crate) fn start() -> Result<()> {
     // Check if the current directory is a Rust cargo project.
     if !Path::new("Cargo.toml").exists() {
@@ -37,16 +40,15 @@ pub(crate) fn start() -> Result<()> {
                 .expect("wrong `.cargo/config.toml` format");
             match build.get_mut("target") {
                 Some(target)
-                    if target.as_str().expect("wrong `.cargo/config.toml` format")
-                        != "wasm32-wasi" =>
+                    if target.as_str().expect("wrong `.cargo/config.toml` format") != TARGET =>
                 {
                     return Err(
-                        anyhow!("value `build.target` inside `.cargo/config.toml` already set to something else than `wasm32-wasi`")
+                        anyhow!("value `build.target` inside `.cargo/config.toml` already set to something else than `{TARGET}`")
                     );
                 }
                 None => {
                     // If value is missing, add it.
-                    build.insert("target".to_owned(), Value::String("wasm32-wasi".to_owned()));
+                    build.insert("target".to_owned(), Value::String(TARGET.to_owned()));
                 }
                 _ => {
                     // If correct value is set don't do anything.
@@ -55,7 +57,7 @@ pub(crate) fn start() -> Result<()> {
         }
         None => {
             let mut new_build = Table::new();
-            new_build.insert("target".to_owned(), Value::String("wasm32-wasi".to_owned()));
+            new_build.insert("target".to_owned(), Value::String(TARGET.to_owned()));
             table.insert("build".to_owned(), Value::Table(new_build));
         }
     };
@@ -66,7 +68,7 @@ pub(crate) fn start() -> Result<()> {
             let target = value
                 .as_table_mut()
                 .expect("wrong `.cargo/config.toml` format");
-            match target.get_mut("wasm32-wasi") {
+            match target.get_mut(TARGET) {
                 Some(value) => {
                     let target = value
                         .as_table_mut()
@@ -87,7 +89,7 @@ pub(crate) fn start() -> Result<()> {
                                 != "lunatic run" =>
                         {
                             return Err(
-                            anyhow!("value `target.wasm32-wasi.runner` inside `.cargo/config.toml` already set to something else than `lunatic run`")
+                            anyhow!("value `target.{TARGET}.runner` inside `.cargo/config.toml` already set to something else than `lunatic run`")
                         );
                         }
                         None => {
@@ -103,21 +105,21 @@ pub(crate) fn start() -> Result<()> {
                     }
                 }
                 None => {
-                    // Create sub-table `wasm32-wasi` with runner set.
+                    // Create sub-table for the target with runner set.
                     let mut new_wasm32_wasi = Table::new();
                     new_wasm32_wasi
                         .insert("runner".to_owned(), Value::String("lunatic run".to_owned()));
-                    target.insert("wasm32-wasi".to_owned(), Value::Table(new_wasm32_wasi));
+                    target.insert(TARGET.to_owned(), Value::Table(new_wasm32_wasi));
                 }
             }
         }
         None => {
-            // Create sub-table `wasm32-wasi` with runner set.
+            // Create sub-table for the target with runner set.
             let mut new_wasm32_wasi = Table::new();
             new_wasm32_wasi.insert("runner".to_owned(), Value::String("lunatic run".to_owned()));
-            // Create table `target` with value `wasm32-wasi`.
+            // Create table `target` with a sub-table for the target.
             let mut new_target = Table::new();
-            new_target.insert("wasm32-wasi".to_owned(), Value::Table(new_wasm32_wasi));
+            new_target.insert(TARGET.to_owned(), Value::Table(new_wasm32_wasi));
             table.insert("target".to_owned(), Value::Table(new_target));
         }
     };

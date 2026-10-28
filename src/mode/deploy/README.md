@@ -25,7 +25,7 @@ This platform-related subset of lunatic CLI app is a command-line interface tool
 
     ```
     # Add the WebAssemby target
-    rustup target add wasm32-wasi
+    rustup target add wasm32-wasip1
     
     # Create a new Rust project
     cargo new hello-lunatic

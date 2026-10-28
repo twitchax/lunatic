@@ -67,7 +67,11 @@ pub(crate) async fn start() -> Result<()> {
     build::start_build().await?;
 
     let binary_name = format!("{}.wasm", cargo.package.name);
-    let artefact = cwd.join("target/wasm32-wasi/release").join(&binary_name);
+    let artefact = cwd
+        .join("target")
+        .join(crate::mode::init::TARGET)
+        .join("release")
+        .join(&binary_name);
 
     if artefact.exists() && artefact.is_file() {
         println!(
