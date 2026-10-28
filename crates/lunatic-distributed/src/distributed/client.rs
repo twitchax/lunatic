@@ -253,17 +253,24 @@ impl Client {
     }
 
     pub async fn await_response(&self, message_id: MessageId) -> Result<ResponseContent> {
-        let response = self
-            .inner
-            .responses
-            .get(&message_id)
-            .ok_or_else(|| anyhow!("message does not exist"))?
-            .0
-            .take()
-            .await;
-        self.inner.responses.remove(&message_id);
-        Ok(response)
+        take_response(&self.inner.responses, message_id).await
     }
+}
+
+// Waits for the response to a message and removes it. The response is cloned out of the map, so
+// that no guard of it is held while waiting: other messages' responses are inserted and removed
+// meanwhile.
+async fn take_response(
+    responses: &DashMap<MessageId, Arc<IncomingResponse>>,
+    message_id: MessageId,
+) -> Result<ResponseContent> {
+    let response = responses
+        .get(&message_id)
+        .map(|response| response.clone())
+        .ok_or_else(|| anyhow!("message does not exist"))?;
+    let content = response.0.take().await;
+    responses.remove(&message_id);
+    Ok(content)
 }
 
 // Returns the sending end of a process' message queue, creating the queue on the first message.
@@ -353,6 +360,39 @@ mod tests {
             offset: AtomicUsize::new(0),
             data: Bytes::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn responses_can_be_added_while_waiting_for_one() {
+        let responses = Arc::new(DashMap::new());
+        responses.insert(MessageId(1), response(false, Duration::ZERO));
+        let waiting = responses.clone();
+        let waiter = tokio::spawn(async move { take_response(&waiting, MessageId(1)).await });
+        // Let the waiter start waiting.
+        tokio::task::yield_now().await;
+
+        // Spawning processes adds the responses to wait for. Blocking on a guard the waiter holds
+        // would block the adding thread for good.
+        let (done, added) = mpsc::channel();
+        let adding = responses.clone();
+        thread::spawn(move || {
+            for message_id in 2..1000 {
+                adding.insert(MessageId(message_id), response(false, Duration::ZERO));
+            }
+            done.send(()).unwrap();
+        });
+        added
+            .recv_timeout(Duration::from_secs(10))
+            .expect("adding responses deadlocked");
+
+        responses
+            .get(&MessageId(1))
+            .unwrap()
+            .0
+            .set(ResponseContent::Sent);
+        let content = waiter.await.unwrap().unwrap();
+        assert!(matches!(content, ResponseContent::Sent));
+        assert!(!responses.contains_key(&MessageId(1)));
     }
 
     #[test]
