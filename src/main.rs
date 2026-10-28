@@ -23,6 +23,26 @@ fn is_run_implied() -> bool {
     test_re.is_match(&std::env::args().nth(1).unwrap())
 }
 
+// Matches the test binaries that cargo builds for wasm targets, e.g.
+// `target/wasm32-wasip1/debug/deps/foo-1a2b3c.wasm`.
+fn test_build_regex() -> Regex {
+    // `wasm32-wasi` was renamed to `wasm32-wasip1` in Rust 1.84, keep matching both.
+    let test_path_matcher: PathBuf = [
+        "target",
+        "wasm32-(wasip1|wasi|unknown-unknown)",
+        "(debug|release)",
+        "deps",
+    ]
+    .iter()
+    .collect();
+    // Escape \ if it is used as path separator
+    let separator = format!("{}", std::path::MAIN_SEPARATOR).replace('\\', r"\\");
+    let test_path_matcher = test_path_matcher.to_string_lossy().replace('\\', r"\\");
+    // Regex that will match test builds
+    let test_regex = format!("{separator}{test_path_matcher}{separator}.*\\.wasm$");
+    Regex::new(&test_regex).unwrap()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Run is implied from lunatic 0.12
@@ -40,20 +60,7 @@ async fn main() -> Result<()> {
         Ok(_manifest_dir) => {
             // _manifest_dir is not used as a prefix because it breaks testing in workspaces where
             // the `target` dir lives outside the manifest dir.
-            let test_path_matcher: PathBuf = [
-                "target",
-                "wasm32-(wasi|unknown-unknown)",
-                "(debug|release)",
-                "deps",
-            ]
-            .iter()
-            .collect();
-            // Escape \ if it is used as path separator
-            let separator = format!("{}", std::path::MAIN_SEPARATOR).replace('\\', r"\\");
-            let test_path_matcher = test_path_matcher.to_string_lossy().replace('\\', r"\\");
-            // Regex that will match test builds
-            let test_regex = format!("{separator}{test_path_matcher}{separator}.*\\.wasm$");
-            let test_regex = regex::Regex::new(&test_regex).unwrap();
+            let test_regex = test_build_regex();
 
             let skip_positions = match is_run_implied() {
                 true => 1,
@@ -78,5 +85,25 @@ async fn main() -> Result<()> {
         cargo_test::test(augmented_args).await
     } else {
         execution::execute(augmented_args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::MAIN_SEPARATOR;
+
+    fn wasm_path(target: &str, dir: &str) -> String {
+        let sep = MAIN_SEPARATOR;
+        format!("{sep}project{sep}target{sep}{target}{sep}debug{sep}{dir}foo-1a2b3c.wasm")
+    }
+
+    #[test]
+    fn test_builds_are_detected() {
+        let test_regex = super::test_build_regex();
+        for target in ["wasm32-wasip1", "wasm32-wasi", "wasm32-unknown-unknown"] {
+            let deps = format!("deps{MAIN_SEPARATOR}");
+            assert!(test_regex.is_match(&wasm_path(target, &deps)), "{}", target);
+            assert!(!test_regex.is_match(&wasm_path(target, "")), "{}", target);
+        }
     }
 }
