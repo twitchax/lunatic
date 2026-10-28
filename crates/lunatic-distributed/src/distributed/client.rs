@@ -71,6 +71,13 @@ pub struct MessageCtx {
 // Receiving part of the message queue
 pub(crate) type BufRx = Receiver<MessageCtx>;
 
+// Sending part of the message queue
+pub struct BufTx {
+    sender: Sender<MessageCtx>,
+    // Set once the process finished. The queue is removed once its messages were sent.
+    pub(crate) finished: bool,
+}
+
 // The response to a message, while it's awaited.
 pub struct IncomingResponse {
     content: AsyncCell<ResponseContent>,
@@ -102,7 +109,7 @@ pub struct Inner {
     // Across Environments and ProcessId's track message queues
     pub buf_rx: DashMap<EnvironmentId, DashMap<ProcessId, BufRx>>,
     // Sending part of the message queue
-    pub buf_tx: DashMap<(EnvironmentId, ProcessId), Sender<MessageCtx>>,
+    pub buf_tx: DashMap<(EnvironmentId, ProcessId), BufTx>,
     // Holds the message while its being chunked
     pub in_progress: DashMap<(EnvironmentId, ProcessId), MessageCtx>,
     pub nodes_queues: DashMap<NodeId, Sender<MessageChunk>>,
@@ -161,28 +168,9 @@ impl Client {
         data: Bytes,
         track_response: bool,
     ) -> Result<MessageId> {
+        self.connect(node).await?;
         // Lazy initialize process message buffers
         let tx = message_queue(&self.inner.buf_tx, &self.inner.buf_rx, env, src);
-
-        let node_manager_exists = self.inner.nodes_queues.get(&node).is_none();
-
-        if node_manager_exists {
-            // Refresh nodes to be sure that target node is up to date
-            self.inner.control_client.refresh_nodes().await.ok();
-            let node_info = self
-                .inner
-                .control_client
-                .node_info(node.0)
-                .ok_or_else(|| anyhow!("Node does not exist"))?;
-            let (send, recv) = tokio::sync::mpsc::channel(1_000_000);
-            tokio::spawn(node_connection_manager(NodeConnectionManager {
-                streams: 10,
-                node_info,
-                client: self.inner.node_client.clone(),
-                message_chunks: recv,
-            }));
-            self.inner.nodes_queues.insert(node, send);
-        }
         let message_id = self.next_message_id();
         // Register the response before queueing the message, so that it can't arrive first.
         if track_response {
@@ -214,6 +202,35 @@ impl Client {
         Ok(message_id)
     }
 
+    // Makes sure that a connection manager forwards the messages for `node`, unless the node is
+    // down. Then the congestion control worker drops its messages.
+    async fn connect(&self, node: NodeId) -> Result<()> {
+        if self.inner.nodes_queues.contains_key(&node) {
+            return Ok(());
+        }
+        // Refresh nodes to be sure that target node is up to date
+        self.inner.control_client.refresh_nodes().await.ok();
+        let node_info = self
+            .inner
+            .control_client
+            .node_info(node.0)
+            .ok_or_else(|| anyhow!("Node does not exist"))?;
+        if self.node_is_gone(node) {
+            return Ok(());
+        }
+        self.inner.nodes_queues.entry(node).or_insert_with(|| {
+            let (send, recv) = tokio::sync::mpsc::channel(1_000_000);
+            tokio::spawn(node_connection_manager(NodeConnectionManager {
+                streams: 10,
+                node_info,
+                client: self.inner.node_client.clone(),
+                message_chunks: recv,
+            }));
+            send
+        });
+        Ok(())
+    }
+
     // Whether the control server stopped listing the node, e.g. because the node stopped.
     pub(crate) fn node_is_gone(&self, node: NodeId) -> bool {
         !self.inner.control_client.node_ids().contains(&node.0)
@@ -230,8 +247,10 @@ impl Client {
         }
     }
 
+    /// Removes the message queue of a finished process, once its queued messages were sent.
     pub fn remove_process_resources(&self, env: EnvironmentId, process_id: ProcessId) {
-        self.inner.buf_tx.remove(&(env, process_id));
+        finish_queue(&self.inner.buf_tx, env, process_id);
+        self.inner.has_messages.notify_one();
     }
 
     // Send distributed message
@@ -344,19 +363,58 @@ async fn take_response(
 // The sender is cloned out of the map, so that no guard of it is held while sending. The queue is
 // created atomically, because many tasks send the responses of a node (environment 0, process 0)
 // concurrently: a second queue would replace the first one, together with its messages.
-fn message_queue(
-    buf_tx: &DashMap<(EnvironmentId, ProcessId), Sender<MessageCtx>>,
+//
+// A finished process' queue is reused until it's removed, so that messages sent on behalf of the
+// process after it finished (e.g. notices of its death) come after the ones it sent itself.
+pub(crate) fn message_queue(
+    buf_tx: &DashMap<(EnvironmentId, ProcessId), BufTx>,
     buf_rx: &DashMap<EnvironmentId, DashMap<ProcessId, BufRx>>,
     env: EnvironmentId,
     src: ProcessId,
 ) -> Sender<MessageCtx> {
     match buf_tx.entry((env, src)) {
-        Entry::Occupied(tx) => tx.get().clone(),
+        Entry::Occupied(tx) => tx.get().sender.clone(),
         Entry::Vacant(entry) => {
             let (send, recv) = tokio::sync::mpsc::channel(1_000_000);
             buf_rx.entry(env).or_default().insert(src, recv);
-            entry.insert(send.clone());
+            entry.insert(BufTx {
+                sender: send.clone(),
+                finished: false,
+            });
             send
+        }
+    }
+}
+
+// Marks the queue of a finished process for removal.
+pub(crate) fn finish_queue(
+    buf_tx: &DashMap<(EnvironmentId, ProcessId), BufTx>,
+    env: EnvironmentId,
+    src: ProcessId,
+) {
+    if let Some(mut tx) = buf_tx.get_mut(&(env, src)) {
+        tx.finished = true;
+    }
+}
+
+// Removes the queue of a finished process if no message is left in it. Holding the sender's entry
+// while removing the receiver keeps `message_queue` from reusing the queue meanwhile.
+pub(crate) fn remove_queue_if_done(
+    buf_tx: &DashMap<(EnvironmentId, ProcessId), BufTx>,
+    buf_rx: &DashMap<EnvironmentId, DashMap<ProcessId, BufRx>>,
+    env: EnvironmentId,
+    src: ProcessId,
+) {
+    if let Entry::Occupied(tx) = buf_tx.entry((env, src)) {
+        let empty = buf_rx
+            .get(&env)
+            .and_then(|env| env.get(&src).map(|recv| recv.is_empty()))
+            .unwrap_or(true);
+        if tx.get().finished && empty {
+            if let Some(env) = buf_rx.get(&env) {
+                env.remove(&src);
+            }
+            tx.remove();
         }
     }
 }

@@ -802,7 +802,14 @@ mod tests {
             .unwrap();
         assert!(node_client.inner.buf_tx.contains_key(&queue));
 
+        // Once its message was sent, the queue goes away.
         drop(state);
-        assert!(!node_client.inner.buf_tx.contains_key(&queue));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while node_client.inner.buf_tx.contains_key(&queue) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the queue wasn't removed");
     }
 }

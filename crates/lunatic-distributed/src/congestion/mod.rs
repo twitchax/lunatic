@@ -56,7 +56,9 @@ use tokio::sync::{
 use crate::{
     distributed::{
         self,
-        client::{BufRx, EnvironmentId, MessageCtx, NodeId, ProcessId},
+        client::{
+            remove_queue_if_done, BufRx, BufTx, EnvironmentId, MessageCtx, NodeId, ProcessId,
+        },
     },
     quic,
 };
@@ -76,6 +78,7 @@ const CHUNK_SIZE: usize = 1024;
 pub async fn congestion_control_worker(state: distributed::Client) -> ! {
     let inner = &state.inner;
     forward_messages(
+        &inner.buf_tx,
         &inner.buf_rx,
         &inner.in_progress,
         &inner.nodes_queues,
@@ -99,6 +102,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(1);
 // No guard of the maps is held across an `.await`, because processes keep queueing messages (and
 // creating queues) while this waits.
 async fn forward_messages(
+    buf_tx: &DashMap<(EnvironmentId, ProcessId), BufTx>,
     buf_rx: &DashMap<EnvironmentId, DashMap<ProcessId, BufRx>>,
     in_progress: &DashMap<(EnvironmentId, ProcessId), MessageCtx>,
     nodes_queues: &DashMap<NodeId, Sender<MessageChunk>>,
@@ -119,6 +123,7 @@ async fn forward_messages(
             .collect();
         let mut progressed = false;
         let mut disconnected = vec![];
+        let mut idle = vec![];
         let mut gone_nodes = vec![];
         for key in queues {
             let finished = if let Some(msg_ctx) = in_progress.get(&key) {
@@ -192,7 +197,7 @@ async fn forward_messages(
                     // Process finished clean up
                     Some(Err(TryRecvError::Disconnected)) => disconnected.push(key),
                     // No new messages
-                    Some(Err(TryRecvError::Empty)) | None => (),
+                    Some(Err(TryRecvError::Empty)) | None => idle.push(key),
                 };
             }
         }
@@ -200,6 +205,12 @@ async fn forward_messages(
         for (env, pid) in disconnected {
             if let Some(env) = buf_rx.get(&env) {
                 env.remove(&pid);
+            }
+        }
+        // Remove the queues of finished processes once they sent all their messages.
+        for (env, pid) in idle {
+            if buf_tx.get(&(env, pid)).is_some_and(|tx| tx.finished) {
+                remove_queue_if_done(buf_tx, buf_rx, env, pid);
             }
         }
         // Stops the connection managers of gone nodes.
@@ -450,13 +461,14 @@ mod tests {
     };
 
     use super::*;
-    use crate::distributed::client::MessageId;
+    use crate::distributed::client::{finish_queue, message_queue, MessageId};
 
     const NODE: NodeId = NodeId(1);
     const OTHER_NODE: NodeId = NodeId(2);
 
     #[derive(Default)]
     struct Queues {
+        buf_tx: DashMap<(EnvironmentId, ProcessId), BufTx>,
         buf_rx: DashMap<EnvironmentId, DashMap<ProcessId, BufRx>>,
         in_progress: DashMap<(EnvironmentId, ProcessId), MessageCtx>,
         nodes_queues: DashMap<NodeId, Sender<MessageChunk>>,
@@ -480,6 +492,7 @@ mod tests {
             let forwarding = queues.clone();
             tokio::spawn(async move {
                 forward_messages(
+                    &forwarding.buf_tx,
                     &forwarding.buf_rx,
                     &forwarding.in_progress,
                     &forwarding.nodes_queues,
@@ -496,14 +509,20 @@ mod tests {
             (queues, chunks)
         }
 
-        // Creates the message queue of a process.
+        // Creates the message queue of a process, or returns it.
         fn queue(&self, env: u64, pid: u64) -> Sender<MessageCtx> {
-            let (sender, receiver) = mpsc::channel(100);
-            self.buf_rx
-                .entry(EnvironmentId(env))
-                .or_default()
-                .insert(ProcessId(pid), receiver);
-            sender
+            message_queue(
+                &self.buf_tx,
+                &self.buf_rx,
+                EnvironmentId(env),
+                ProcessId(pid),
+            )
+        }
+
+        // The process finished.
+        fn finish(&self, env: u64, pid: u64) {
+            finish_queue(&self.buf_tx, EnvironmentId(env), ProcessId(pid));
+            self.has_messages.notify_one();
         }
 
         // Queues a single-chunk message, the way `Client::new_message` does.
@@ -700,15 +719,19 @@ mod tests {
         queues.send(&queue, 0, 1, 2).await;
         // Let the worker start forwarding the first message, then the process finishes.
         tokio::task::yield_now().await;
+        queues.finish(0, 1);
+        // A message on behalf of the finished process, e.g. a notice of its death.
+        queues.send(&queues.queue(0, 1), 0, 1, 3).await;
         drop(queue);
 
         let mut chunk_ids = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..5 {
             let chunk = next_chunk(&mut chunks).await;
             chunk_ids.push((chunk.message_id, chunk.chunk_id));
         }
-        assert_eq!(chunk_ids, vec![(1, 0), (1, 1), (1, 2), (2, 0)]);
+        assert_eq!(chunk_ids, vec![(1, 0), (1, 1), (1, 2), (2, 0), (3, 0)]);
         assert!(queues.buf_rx.get(&EnvironmentId(0)).unwrap().is_empty());
+        assert!(queues.buf_tx.is_empty());
     }
 
     // A server whose connections let a client open up to `streams` unidirectional streams, and a
