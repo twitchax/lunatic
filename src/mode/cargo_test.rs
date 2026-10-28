@@ -11,6 +11,7 @@ use lunatic_process_api::ProcessConfigCtx;
 use lunatic_runtime::{DefaultProcessConfig, DefaultProcessState};
 use lunatic_stdout_capture::StdoutCapture;
 use lunatic_wasi_api::LunaticWasiCtx;
+use regex::Regex;
 use tokio::sync::RwLock;
 
 #[derive(Parser, Debug)]
@@ -209,11 +210,7 @@ pub(crate) async fn test(augmented_args: Option<Vec<String>>) -> Result<()> {
 
     let config = Arc::new(config);
 
-    let panic_regex =
-        // Modes:
-        // * m: ^ and $ match begin/end of line (not string)
-        // * s: allow . to match \n
-        regex::Regex::new("(?ms)^thread '.*' panicked at '(.*)', ").unwrap();
+    let panic_regex = Regex::new(PANIC_PATTERN).unwrap();
 
     for test_function in test_functions {
         // Skip over filtered out functions
@@ -295,7 +292,7 @@ pub(crate) async fn test(augmented_args: Option<Vec<String>>) -> Result<()> {
                 Err(_err) => {
                     // Find panic output
                     let content = stdout.content();
-                    let panic_detected = panic_regex.captures(&content);
+                    let panic_detected = panic_message(&panic_regex, &content);
 
                     match test_function.panic {
                         // If we didn't expect a panic, but got one or were killed by a signal
@@ -313,8 +310,7 @@ pub(crate) async fn test(augmented_args: Option<Vec<String>>) -> Result<()> {
                         }
                         Some(expected_panic) => {
                             match panic_detected {
-                                Some(panic) => {
-                                    let panic_message = panic.get(1).map_or("", |m| m.as_str());
+                                Some(panic_message) => {
                                     if panic_message.contains(&expected_panic) {
                                         TestResult {
                                             name: test_function.function_name,
@@ -450,6 +446,21 @@ pub(crate) async fn test(augmented_args: Option<Vec<String>>) -> Result<()> {
     }
 }
 
+// Matches a panic in a test's output, in the format of Rust 1.73 and later
+// (`thread 'main' (1) panicked at src/lib.rs:2:5:\nmessage`, the thread ID was added later)
+// and in the format before it (`thread 'main' panicked at 'message', src/lib.rs:2:5`).
+// Modes:
+// * m: ^ and $ match begin/end of line (not string)
+// * s: allow . to match \n
+const PANIC_PATTERN: &str = r"(?ms)^thread '.*?'(?: \(\d+\))? panicked at (?:'(?P<legacy>.*)', |[^\n]*:\n(?P<message>.*?)(?:\nnote: |\z))";
+
+// Returns the message of the first panic in a test's output, if it panicked.
+fn panic_message<'a>(panic_regex: &Regex, output: &'a str) -> Option<&'a str> {
+    let panic = panic_regex.captures(output)?;
+    let message = panic.name("message").or_else(|| panic.name("legacy"));
+    Some(message.map_or("", |m| m.as_str()))
+}
+
 #[derive(Debug)]
 struct Test {
     wasm_export_name: String,
@@ -473,4 +484,49 @@ enum TestStatus {
     PanicOk,
     PanicFailed,
     Ignored,
+}
+
+#[cfg(test)]
+mod tests {
+    use regex::Regex;
+
+    use super::{panic_message, PANIC_PATTERN};
+
+    fn message(output: &str) -> Option<&str> {
+        panic_message(&Regex::new(PANIC_PATTERN).unwrap(), output)
+    }
+
+    #[test]
+    fn panic_messages_are_found() {
+        let note =
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n";
+        // Rust 1.73 and later, with and without the thread ID.
+        assert_eq!(
+            message(&format!(
+                "output\nthread '<unnamed>' (1) panicked at src/lib.rs:6:5:\nWord contained\n{}",
+                note
+            )),
+            Some("Word contained")
+        );
+        assert_eq!(
+            message(&format!(
+                "thread 'main' panicked at src/lib.rs:6:5:\n#\n{}",
+                note
+            )),
+            Some("#")
+        );
+        assert_eq!(
+            message("thread 'main' (2) panicked at src/lib.rs:1:1:\nleft: 1\nright: 2"),
+            Some("left: 1\nright: 2")
+        );
+        // Before Rust 1.73.
+        assert_eq!(
+            message(&format!(
+                "thread 'main' panicked at 'Word contained', src/lib.rs:6:5\n{}",
+                note
+            )),
+            Some("Word contained")
+        );
+        assert_eq!(message("output without a panic\n"), None);
+    }
 }
