@@ -54,7 +54,7 @@ impl Message {
         match self {
             Message::Data(message) => message.write_metrics(),
             Message::LinkDied(_) => {
-                metrics::increment_counter!("lunatic.process.messages.link_died.count");
+                metrics::counter!("lunatic.process.messages.link_died.count").increment(1);
             }
             Message::ProcessDied(_) => {}
         }
@@ -148,12 +148,10 @@ impl DataMessage {
 
     #[cfg(feature = "metrics")]
     pub fn write_metrics(&self) {
-        metrics::increment_counter!("lunatic.process.messages.data.count");
-        metrics::histogram!(
-            "lunatic.process.messages.data.resources.count",
-            self.resources.len() as f64
-        );
-        metrics::histogram!("lunatic.process.messages.data.size", self.size() as f64);
+        metrics::counter!("lunatic.process.messages.data.count").increment(1);
+        metrics::histogram!("lunatic.process.messages.data.resources.count")
+            .record(self.resources.len() as f64);
+        metrics::histogram!("lunatic.process.messages.data.size").record(self.size() as f64);
     }
 
     fn take_downcast<T: Send + Sync + 'static>(&mut self, index: usize) -> Option<Arc<T>> {

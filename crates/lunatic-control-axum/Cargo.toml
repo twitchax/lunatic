@@ -14,10 +14,10 @@ lunatic-distributed = { workspace = true }
 anyhow = { workspace = true }
 axum = { version = "0.8", features = ["json", "query", "macros"] }
 tower-http = { version = "0.7", features = ["limit"] }
-base64-url = "2.0"
+base64-url = "4"
 chrono = { version = "0.4.23", default-features = false, features = ["clock", "std"] }
 dashmap = { workspace = true }
-getrandom = "0.2.8"
+getrandom = "0.4"
 http = "1"
 log = { workspace = true }
 rcgen = "0.14"

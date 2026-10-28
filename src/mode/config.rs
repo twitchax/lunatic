@@ -141,8 +141,8 @@ where
             Err(_e) => {
                 let mut file = fs::File::create(path).expect("failed to create new lunatic.toml");
                 let initial_state = Self::default();
-                let encoded = toml::to_vec(&initial_state).expect("Failed to encode toml");
-                file.write_all(&encoded)
+                let encoded = toml::to_string(&initial_state).expect("Failed to encode toml");
+                file.write_all(encoded.as_bytes())
                     .expect("Failed to write toml to file");
                 initial_state
             }
@@ -158,10 +158,10 @@ where
             .write(true)
             .open(file_path)
             .map_err(|_e| ConfigError::FileMissing("-"))?;
-        let encoded = toml::to_vec(self).map_err(|_| ConfigError::TomlEncodingFailed)?;
+        let encoded = toml::to_string(self).map_err(|_| ConfigError::TomlEncodingFailed)?;
         file.rewind()
             .map_err(|e| ConfigError::FileWriteFailed(e.to_string()))?;
-        file.write_all(&encoded).map_err(|_| {
+        file.write_all(encoded.as_bytes()).map_err(|_| {
             ConfigError::FileReadFailed(format!(
                 "failed to encode config file '{:?}' as toml",
                 Self::get_file_path()

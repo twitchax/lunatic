@@ -622,4 +622,64 @@ mod tests {
         done.recv_timeout(Duration::from_secs(30))
             .expect("the guest didn't yield back to the executor");
     }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn guest_metrics_are_recorded() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        // Calls each metrics host function on the metrics "counter", "gauge" and "histo".
+        let wat = r#"
+            (module
+                (import "lunatic::metrics" "counter" (func $counter (param i32 i32 i64)))
+                (import "lunatic::metrics" "increment_counter"
+                    (func $increment_counter (param i32 i32)))
+                (import "lunatic::metrics" "gauge" (func $gauge (param i32 i32 f64)))
+                (import "lunatic::metrics" "increment_gauge"
+                    (func $increment_gauge (param i32 i32 f64)))
+                (import "lunatic::metrics" "decrement_gauge"
+                    (func $decrement_gauge (param i32 i32 f64)))
+                (import "lunatic::metrics" "histogram" (func $histogram (param i32 i32 f64)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "countergaugehisto")
+                (func (export "hello")
+                    (call $counter (i32.const 0) (i32.const 7) (i64.const 5))
+                    (call $increment_counter (i32.const 0) (i32.const 7))
+                    (call $gauge (i32.const 7) (i32.const 5) (f64.const 10))
+                    (call $increment_gauge (i32.const 7) (i32.const 5) (f64.const 2))
+                    (call $decrement_gauge (i32.const 7) (i32.const 5) (f64.const 0.5))
+                    (call $histogram (i32.const 12) (i32.const 5) (f64.const 3))))
+        "#;
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let task = spawn_hello(wat, Default::default(), None).await;
+                    task.await.unwrap().unwrap();
+                })
+        });
+
+        let metrics: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(key, _, _, value)| (key.key().name().to_owned(), value))
+            .collect();
+        let value = |name: &str| {
+            metrics
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value)
+        };
+        assert_eq!(value("counter"), Some(&DebugValue::Counter(6)));
+        assert_eq!(value("gauge"), Some(&DebugValue::Gauge(11.5.into())));
+        assert_eq!(
+            value("histo"),
+            Some(&DebugValue::Histogram(vec![3.0.into()]))
+        );
+    }
 }

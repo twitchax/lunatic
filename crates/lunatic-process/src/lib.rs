@@ -209,7 +209,7 @@ impl Process for WasmProcess {
             ("process_id", self.id().to_string()),
         ];
         #[cfg(feature = "metrics")]
-        metrics::increment_counter!("lunatic.process.signals.send", &labels);
+        metrics::counter!("lunatic.process.signals.send", &labels).increment(1);
 
         // If the receiver doesn't exist or is closed, just ignore it and drop the `signal`.
         // lunatic can't guarantee that a message was successfully seen by the receiving side even
@@ -313,7 +313,7 @@ where
             // Handle signals first
             signal = signal_mailbox.recv(), if has_sender => {
                 #[cfg(feature = "metrics")]
-                metrics::increment_counter!("lunatic.process.signals.received", &labels);
+                metrics::counter!("lunatic.process.signals.received", &labels).increment(1);
 
                 match signal.ok_or(()) {
                     Ok(Signal::Message(message)) => {
@@ -325,10 +325,10 @@ where
 
                         // process metrics
                         #[cfg(feature = "metrics")]
-                        metrics::increment_counter!("lunatic.process.messages.send", &labels);
+                        metrics::counter!("lunatic.process.messages.send", &labels).increment(1);
 
                         #[cfg(feature = "metrics")]
-                        metrics::gauge!("lunatic.process.messages.outstanding", message_mailbox.len() as f64, &labels);
+                        metrics::gauge!("lunatic.process.messages.outstanding", &labels).set(message_mailbox.len() as f64);
                     },
                     Ok(Signal::DieWhenLinkDies(value)) => die_when_link_dies = value,
                     // Put process into list of linked processes
@@ -336,14 +336,14 @@ where
                         links.insert(proc.id(), (proc, tag));
 
                         #[cfg(feature = "metrics")]
-                        metrics::gauge!("lunatic.process.links.alive", links.len() as f64, &labels);
+                        metrics::gauge!("lunatic.process.links.alive", &labels).set(links.len() as f64);
                     },
                     // Remove process from list
                     Ok(Signal::UnLink { process_id }) => {
                         links.remove(&process_id);
 
                         #[cfg(feature = "metrics")]
-                        metrics::gauge!("lunatic.process.links.alive", links.len() as f64, &labels);
+                        metrics::gauge!("lunatic.process.links.alive", &labels).set(links.len() as f64);
                     }
                     // Exit loop and don't poll anymore the future if Signal::Kill received.
                     Ok(Signal::Kill) => break Finished::KillSignal,
@@ -353,7 +353,7 @@ where
                         links.remove(&id);
 
                         #[cfg(feature = "metrics")]
-                        metrics::gauge!("lunatic.process.links.alive", links.len() as f64, &labels);
+                        metrics::gauge!("lunatic.process.links.alive", &labels).set(links.len() as f64);
                         match reason {
                             DeathReason::Failure | DeathReason::NoProcess => {
                                 if die_when_link_dies {
@@ -364,10 +364,10 @@ where
                                     let message = Message::LinkDied(tag);
 
                                     #[cfg(feature = "metrics")]
-                                    metrics::increment_counter!("lunatic.process.messages.send", &labels);
+                                    metrics::counter!("lunatic.process.messages.send", &labels).increment(1);
 
                                     #[cfg(feature = "metrics")]
-                                    metrics::gauge!("lunatic.process.messages.outstanding", message_mailbox.len() as f64, &labels);
+                                    metrics::gauge!("lunatic.process.messages.outstanding", &labels).set(message_mailbox.len() as f64);
                                     message_mailbox.push(message);
                                 }
                             },
@@ -504,7 +504,7 @@ impl Process for NativeProcess {
             ("process_id", self.id().to_string()),
         ];
         #[cfg(feature = "metrics")]
-        metrics::increment_counter!("lunatic.process.signals.send", &labels);
+        metrics::counter!("lunatic.process.signals.send", &labels).increment(1);
 
         // If the receiver doesn't exist or is closed, just ignore it and drop the `signal`.
         // lunatic can't guarantee that a message was successfully seen by the receiving side even

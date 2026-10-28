@@ -11,7 +11,7 @@ use log::debug;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zip::{write::FileOptions, CompressionMethod, ZipWriter};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 mod artefact;
 mod build;
 
@@ -154,7 +154,7 @@ async fn upload_static_files_if_exist(
     let static_path = cwd.join(assets_dir.unwrap_or_else(|| "static".to_string()));
     if static_path.exists() && static_path.is_dir() {
         let writer = Cursor::new(Vec::new());
-        let options = FileOptions::default()
+        let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .unix_permissions(0o755);
         let mut zip = ZipWriter::new(writer);

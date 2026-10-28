@@ -26,10 +26,8 @@ pub(crate) fn start() -> Result<()> {
     let mut content = String::new();
     config_toml.read_to_string(&mut content).unwrap();
 
-    let mut content = content.parse::<Value>().unwrap();
-    let table = content
-        .as_table_mut()
-        .expect("wrong .cargo/config.toml` format");
+    let mut content = content.parse::<Table>().unwrap();
+    let table = &mut content;
 
     // Set correct target
     match table.get_mut("build") {

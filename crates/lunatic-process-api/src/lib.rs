@@ -212,10 +212,10 @@ where
     }
 
     #[cfg(feature = "metrics")]
-    metrics::increment_counter!("lunatic.process.modules.compiled");
+    metrics::counter!("lunatic.process.modules.compiled").increment(1);
 
     #[cfg(feature = "metrics")]
-    metrics::increment_gauge!("lunatic.process.modules.active", 1.0);
+    metrics::gauge!("lunatic.process.modules.active").increment(1.0);
 
     #[cfg(feature = "metrics")]
     let start = Instant::now();
@@ -241,7 +241,7 @@ where
     #[cfg(feature = "metrics")]
     let duration = Instant::now() - start;
     #[cfg(feature = "metrics")]
-    metrics::histogram!("lunatic.process.modules.compiled.duration", duration);
+    metrics::histogram!("lunatic.process.modules.compiled.duration").record(duration);
 
     memory
         .write(&mut caller, id_ptr as usize, &mod_or_error_id.to_le_bytes())
@@ -258,10 +258,10 @@ fn drop_module<T: ProcessState + ProcessCtx<T>>(
     module_id: u64,
 ) -> Result<()> {
     #[cfg(feature = "metrics")]
-    metrics::increment_counter!("lunatic.process.modules.dropped");
+    metrics::counter!("lunatic.process.modules.dropped").increment(1);
 
     #[cfg(feature = "metrics")]
-    metrics::decrement_gauge!("lunatic.process.modules.active", 1.0);
+    metrics::gauge!("lunatic.process.modules.active").decrement(1.0);
 
     caller
         .data_mut()
@@ -288,9 +288,9 @@ where
     }
     let config = T::Config::default();
     #[cfg(feature = "metrics")]
-    metrics::increment_counter!("lunatic.process.configs.created");
+    metrics::counter!("lunatic.process.configs.created").increment(1);
     #[cfg(feature = "metrics")]
-    metrics::increment_gauge!("lunatic.process.configs.active", 1.0);
+    metrics::gauge!("lunatic.process.configs.active").increment(1.0);
     caller.data_mut().config_resources_mut().add(config) as i64
 }
 
@@ -308,9 +308,9 @@ fn drop_config<T: ProcessState + ProcessCtx<T>>(
         .remove(config_id)
         .or_trap("lunatic::process::drop_config: Config ID doesn't exist")?;
     #[cfg(feature = "metrics")]
-    metrics::increment_counter!("lunatic.process.configs.dropped");
+    metrics::counter!("lunatic.process.configs.dropped").increment(1);
     #[cfg(feature = "metrics")]
-    metrics::decrement_gauge!("lunatic.process.configs.active", 1.0);
+    metrics::gauge!("lunatic.process.configs.active").decrement(1.0);
     Ok(())
 }
 

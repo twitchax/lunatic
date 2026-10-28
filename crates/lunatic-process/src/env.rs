@@ -58,11 +58,8 @@ impl Environment for LunaticEnvironment {
         #[cfg(all(feature = "metrics", feature = "detailed_metrics"))]
         let labels = [("environment_id", self.id().to_string())];
         #[cfg(feature = "metrics")]
-        metrics::gauge!(
-            "lunatic.process.environment.process.count",
-            self.processes.len() as f64,
-            &labels
-        );
+        metrics::gauge!("lunatic.process.environment.process.count", &labels)
+            .set(self.processes.len() as f64);
     }
 
     fn remove_process(&self, id: u64) {
@@ -72,11 +69,8 @@ impl Environment for LunaticEnvironment {
         #[cfg(all(feature = "metrics", feature = "detailed_metrics"))]
         let labels = [("environment_id", self.id().to_string())];
         #[cfg(feature = "metrics")]
-        metrics::gauge!(
-            "lunatic.process.environment.process.count",
-            self.processes.len() as f64,
-            &labels
-        );
+        metrics::gauge!("lunatic.process.environment.process.count", &labels)
+            .set(self.processes.len() as f64);
     }
 
     fn process_count(&self) -> usize {
@@ -115,7 +109,7 @@ impl Environments for LunaticEnvironments {
         let env = Arc::new(LunaticEnvironment::new(id));
         self.envs.insert(id, env.clone());
         #[cfg(feature = "metrics")]
-        metrics::gauge!("lunatic.process.environment.count", self.envs.len() as f64);
+        metrics::gauge!("lunatic.process.environment.count").set(self.envs.len() as f64);
         Ok(env)
     }
 

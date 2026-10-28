@@ -69,10 +69,10 @@ fn put<T: ProcessState + ProcessCtx<T> + Send + Sync>(
             .insert(name.to_owned(), (node_id, process_id));
 
         #[cfg(feature = "metrics")]
-        metrics::increment_counter!("lunatic.registry.write");
+        metrics::counter!("lunatic.registry.write").increment(1);
 
         #[cfg(feature = "metrics")]
-        metrics::increment_gauge!("lunatic.registry.registered", 1.0);
+        metrics::gauge!("lunatic.registry.registered").increment(1.0);
 
         Ok(())
     })
@@ -98,7 +98,7 @@ fn get<T: ProcessState + ProcessCtx<T> + Send + Sync>(
         let name = std::str::from_utf8(name).or_trap("lunatic::registry::get")?;
 
         #[cfg(feature = "metrics")]
-        metrics::increment_counter!("lunatic.registry.read");
+        metrics::counter!("lunatic.registry.read").increment(1);
 
         let (node_id, process_id) = if let Some(process) = state.registry().read().await.get(name) {
             *process
@@ -141,10 +141,10 @@ fn remove<T: ProcessState + ProcessCtx<T> + Send + Sync>(
         state.registry().write().await.remove(name);
 
         #[cfg(feature = "metrics")]
-        metrics::increment_counter!("lunatic.registry.deletion");
+        metrics::counter!("lunatic.registry.deletion").increment(1);
 
         #[cfg(feature = "metrics")]
-        metrics::decrement_gauge!("lunatic.registry.registered", 1.0);
+        metrics::gauge!("lunatic.registry.registered").decrement(1.0);
 
         Ok(())
     })

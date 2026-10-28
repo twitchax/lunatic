@@ -53,7 +53,7 @@ pub async fn register(
         .pem();
 
     let mut authentication_token = [0u8; 32];
-    getrandom::getrandom(&mut authentication_token)
+    getrandom::fill(&mut authentication_token)
         .map_err(|e| ApiError::log_internal("Error generating random token for registration", e))?;
     let authentication_token = base64_url::encode(&authentication_token);
 
