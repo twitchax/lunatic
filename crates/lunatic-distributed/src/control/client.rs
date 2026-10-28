@@ -3,14 +3,20 @@ use dashmap::DashMap;
 use lunatic_control::api::*;
 use lunatic_control::NodeInfo;
 use lunatic_process::runtimes::RawWasm;
-use reqwest::{Client as HttpClient, Url};
+use reqwest::{Client as HttpClient, Response, StatusCode, Url};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{atomic, atomic::AtomicU64, Arc, RwLock},
+    sync::{atomic, atomic::AtomicU64, Arc, Mutex, RwLock},
     time::Duration,
 };
+use tokio::sync::watch;
+
+// How often the node list is refreshed, which also renews this node's lease on the control server.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+type NodeDownHandler = Box<dyn Fn(u64) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Client {
@@ -26,6 +32,11 @@ pub struct InnerClient {
     node_queries: DashMap<u64, Vec<u64>>,
     nodes: DashMap<u64, NodeInfo>,
     node_ids: RwLock<Vec<u64>>,
+    // Serializes node list refreshes, so that an older list never replaces a newer one.
+    refreshing: tokio::sync::Mutex<()>,
+    node_down_handlers: Mutex<Vec<NodeDownHandler>>,
+    // Set once the control server dropped this node from the cluster.
+    fenced: watch::Sender<bool>,
 }
 
 impl Client {
@@ -55,6 +66,9 @@ impl Client {
                 next_query_id: AtomicU64::new(1),
                 nodes: Default::default(),
                 node_ids: Default::default(),
+                refreshing: Default::default(),
+                node_down_handlers: Default::default(),
+                fenced: watch::Sender::new(false),
             }),
         };
 
@@ -155,7 +169,8 @@ impl Client {
             )
             .send()
             .await
-            .with_context(|| format!("Error sending HTTP GET request: {}.", url))?
+            .with_context(|| format!("Error sending HTTP GET request: {}.", url))
+            .and_then(|response| self.check_lease(response))?
             .error_for_status()
             .with_context(|| format!("HTTP GET request returned an error response: {}", url))?
             .json()
@@ -180,7 +195,8 @@ impl Client {
             )
             .send()
             .await
-            .with_context(|| format!("Error sending HTTP POST request: {}.", url))?
+            .with_context(|| format!("Error sending HTTP POST request: {}.", url))
+            .and_then(|response| self.check_lease(response))?
             .error_for_status()
             .with_context(|| format!("HTTP POST request returned an error response: {}", url))?
             .json()
@@ -205,7 +221,8 @@ impl Client {
             )
             .send()
             .await
-            .with_context(|| format!("Error sending HTTP POST request: {}.", url))?
+            .with_context(|| format!("Error sending HTTP POST request: {}.", url))
+            .and_then(|response| self.check_lease(response))?
             .error_for_status()
             .with_context(|| format!("HTTP POST request returned an error response: {}", url))
             .map_err(|e| dbg!(e))?
@@ -217,6 +234,7 @@ impl Client {
     }
 
     pub async fn refresh_nodes(&self) -> Result<()> {
+        let _refreshing = self.inner.refreshing.lock().await;
         let resp: NodesList = self.get(&self.inner.reg.urls.nodes, None).await?;
         let mut node_ids = vec![];
         for node in resp.nodes {
@@ -226,10 +244,53 @@ impl Client {
                 self.inner.nodes.insert(id, node);
             }
         }
-        if let Ok(mut self_node_ids) = self.inner.node_ids.write() {
-            *self_node_ids = node_ids;
+        let down: Vec<u64> = match self.inner.node_ids.write() {
+            Ok(mut self_node_ids) => {
+                let down = self_node_ids
+                    .iter()
+                    .filter(|id| !node_ids.contains(id))
+                    .copied()
+                    .collect();
+                *self_node_ids = node_ids;
+                down
+            }
+            Err(_) => Vec::new(),
+        };
+        // Nodes leave the list when they stop, or when their lease on the control server ran out.
+        for node_id in down {
+            log::warn!("Node {node_id} left the cluster");
+            if let Ok(handlers) = self.inner.node_down_handlers.lock() {
+                for handler in handlers.iter() {
+                    handler(node_id);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Calls `handler` with the ID of every node that leaves the cluster.
+    pub fn on_node_down(&self, handler: impl Fn(u64) + Send + Sync + 'static) {
+        if let Ok(mut handlers) = self.inner.node_down_handlers.lock() {
+            handlers.push(Box::new(handler));
+        }
+    }
+
+    /// Returns once the control server dropped this node from the cluster, because its lease
+    /// ran out. The node can't rejoin then.
+    pub async fn fenced(&self) {
+        let mut fenced = self.inner.fenced.subscribe();
+        fenced.wait_for(|fenced| *fenced).await.ok();
+    }
+
+    // The control server rejects every request of a node whose lease ran out.
+    fn check_lease(&self, response: Response) -> Result<Response> {
+        if response.status() == StatusCode::GONE {
+            self.inner.fenced.send_replace(true);
+            return Err(anyhow!(
+                "The control server dropped this node from the cluster, its lease ran out"
+            ));
+        }
+        Ok(response)
     }
 
     pub async fn notify_node_stopped(&self) -> Result<()> {
@@ -285,9 +346,10 @@ impl Client {
     }
 }
 
+// When the control server can't be reached, the node keeps its last known node list.
 async fn refresh_nodes_task(client: Client) -> Result<()> {
     loop {
         client.refresh_nodes().await.ok();
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(REFRESH_INTERVAL).await;
     }
 }

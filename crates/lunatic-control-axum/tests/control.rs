@@ -119,3 +119,84 @@ async fn nodes_whose_lease_ran_out_are_rejected() {
         assert!(nodes.text().await.unwrap().contains("node_expired"));
     }
 }
+
+// Registers and starts a node with the control server at `control_url`.
+async fn start_node(control_url: &str) -> Client {
+    let http_client = reqwest::Client::new();
+    let node_name = Uuid::new_v4();
+    let (csr, _key) = gen_node_cert(&node_name.to_string()).unwrap();
+    let reg = Client::register(
+        &http_client,
+        control_url.parse().unwrap(),
+        node_name,
+        csr.pem().unwrap(),
+    )
+    .await
+    .unwrap();
+    let node_address = "127.0.0.1:1".parse().unwrap();
+    Client::new(http_client, reg, node_address, HashMap::new())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn nodes_whose_lease_ran_out_are_fenced() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let control_url = format!("http://{}/", listener.local_addr().unwrap());
+    // Shorter than the interval at which nodes renew their lease.
+    let lease = Duration::from_millis(300);
+    let control = ControlServer::with_test_root_cert()
+        .unwrap()
+        .with_lease(lease);
+    tokio::spawn(serve(listener, Arc::new(control)));
+
+    let client = start_node(&control_url).await;
+    tokio::time::timeout(Duration::from_secs(5), client.fenced())
+        .await
+        .expect("the node wasn't fenced");
+}
+
+#[tokio::test]
+async fn nodes_that_leave_are_reported() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let control_url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(control_server_from_tcp(listener));
+
+    let leaving = start_node(&control_url).await;
+    let staying = start_node(&control_url).await;
+    staying.refresh_nodes().await.unwrap();
+    assert_eq!(staying.node_ids().len(), 2);
+    let (down_sender, mut down) = tokio::sync::mpsc::unbounded_channel();
+    staying.on_node_down(move |node_id| {
+        down_sender.send(node_id).ok();
+    });
+
+    leaving.notify_node_stopped().await.unwrap();
+    let down_node = tokio::time::timeout(Duration::from_secs(5), down.recv())
+        .await
+        .expect("the node wasn't reported down");
+    assert_eq!(down_node, Some(leaving.node_id()));
+    assert_eq!(staying.node_ids(), vec![staying.node_id()]);
+}
+
+#[tokio::test]
+async fn nodes_keep_their_view_while_the_control_server_is_unreachable() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let control_url = format!("http://{}/", listener.local_addr().unwrap());
+    let control_server = tokio::spawn(control_server_from_tcp(listener));
+
+    let other = start_node(&control_url).await;
+    let client = start_node(&control_url).await;
+    client.refresh_nodes().await.unwrap();
+    control_server.abort();
+
+    assert!(client.refresh_nodes().await.is_err());
+    let mut node_ids = client.node_ids();
+    node_ids.sort();
+    assert_eq!(node_ids, vec![other.node_id(), client.node_id()]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), client.fenced())
+            .await
+            .is_err()
+    );
+}

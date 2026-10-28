@@ -189,11 +189,18 @@ pub(crate) async fn start(args: Args) -> Result<()> {
         std::process::exit(0);
     });
 
-    node.await.ok();
-
-    control_client.notify_node_stopped().await.ok();
-
-    Ok(())
+    tokio::select! {
+        _ = node => {
+            control_client.notify_node_stopped().await.ok();
+            Ok(())
+        }
+        // A node that the control server dropped can't rejoin. Exit, so that a supervisor can
+        // start a fresh one.
+        _ = control_client.fenced() => {
+            log::error!("The control server dropped this node from the cluster, its lease ran out");
+            Err(anyhow!("Node {node_id} was dropped from the cluster"))
+        }
+    }
 }
 
 fn get_available_localhost() -> Option<SocketAddr> {
