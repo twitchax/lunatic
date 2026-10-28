@@ -619,7 +619,7 @@ fn spawn_error<T: ErrorCtx>(
 // Returns:
 // * 0      If message sent
 // * 1      If process_id does not exist
-// * 2      If node_id does not exist
+// * 2      If node_id does not exist: it isn't in the cluster, or left it. The message is dropped.
 // * 9027   If node connection error occurred
 //
 // Traps:
@@ -654,6 +654,10 @@ where
             }
 
             let state = caller.data();
+            let node_client = state.distributed()?.node_client.clone();
+            if !node_client.is_in_cluster(NodeId(node_id)).await {
+                return Ok(2);
+            }
             let send_params = SendParams {
                 env: EnvironmentId(state.environment_id()),
                 src: ProcessId(state.id()),
@@ -662,7 +666,7 @@ where
                 tag,
                 data: buffer,
             };
-            match state.distributed()?.node_client.send(send_params).await {
+            match node_client.send(send_params).await {
                 Ok(_) => Ok(0),
                 Err(cause) => Err(anyhow!(cause)),
             }
@@ -687,7 +691,8 @@ where
 // Returns:
 // * 0    If message arrived.
 // * 1    If process_id does not exist
-// * 2    If node_id does not exist, or the node went down before the process replied
+// * 2    If node_id does not exist (it isn't in the cluster, or left it), or the node went down
+//        before the process replied
 // * 9027 If call timed out.
 //
 // Traps:
@@ -724,6 +729,10 @@ where
             }
 
             let state = caller.data();
+            let node_client = state.distributed()?.node_client.clone();
+            if !node_client.is_in_cluster(NodeId(node_id)).await {
+                return Ok(2);
+            }
             let send_params = SendParams {
                 env: EnvironmentId(state.environment_id()),
                 src: ProcessId(state.id()),
@@ -732,7 +741,6 @@ where
                 tag,
                 data: buffer,
             };
-            let node_client = state.distributed()?.node_client.clone();
             let message_id = node_client
                 .send_tracked(send_params)
                 .await

@@ -1,7 +1,7 @@
 ;; Run with `lunatic node --wasm`: monitors a process on another node, which waits forever. Prints
 ;; "monitoring" once it monitors the process, then "node down ok" once the monitor fired because
-;; the other node went down and spawns on it fail, and "node down failed" otherwise. Spawns on a
-;; node that never existed fail too.
+;; the other node went down and spawns and sends to it fail, and "node down failed" otherwise. Spawns
+;; and sends to a node that never existed fail too.
 (module
     (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
     (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
@@ -14,6 +14,10 @@
         (func $get_or_spawn
             (param i32 i32 i64 i64 i64 i32 i32 i32 i32 i32 i32) (result i32)))
     (import "lunatic::distributed" "monitor" (func $monitor (param i64 i64)))
+    (import "lunatic::distributed" "send" (func $send (param i64 i64) (result i32)))
+    (import "lunatic::distributed" "send_receive_skip_search"
+        (func $send_receive_skip_search (param i64 i64 i64 i64) (result i32)))
+    (import "lunatic::message" "create_data" (func $create_data (param i64 i64)))
     (import "lunatic::registry" "get" (func $registry_get (param i32 i32 i32 i32) (result i32)))
     (import "lunatic::message" "receive" (func $receive (param i32 i32 i64) (result i32)))
 
@@ -35,8 +39,9 @@
         (call $print (i32.const 64) (i32.const 17))
         (call $proc_exit (i32.const 1)))
 
-    ;; Spawning on `node` fails because it isn't in the cluster (1), and leaves "name" free.
-    (func $spawns_fail (param $node i64)
+    ;; Spawning on `node` fails because it isn't in the cluster (1), and leaves "name" free. Sends
+    ;; to it fail (2).
+    (func $requests_fail (param $node i64)
         (if (i32.ne (i32.const 1)
                 (call $spawn (local.get $node) (i64.const -1) (call $module_id)
                     (i32.const 16) (i32.const 6) (i32.const 128) (i32.const 0) (i32.const 192)))
@@ -48,6 +53,14 @@
             (then (call $fail)))
         (if (i32.ne (i32.const 1)
                 (call $registry_get (i32.const 24) (i32.const 4) (i32.const 200) (i32.const 192)))
+            (then (call $fail)))
+        (call $create_data (i64.const 0) (i64.const 0))
+        (if (i32.ne (i32.const 2) (call $send (local.get $node) (i64.const 1)))
+            (then (call $fail)))
+        (call $create_data (i64.const 0) (i64.const 0))
+        (if (i32.ne (i32.const 2)
+                (call $send_receive_skip_search (local.get $node) (i64.const 1) (i64.const 0)
+                    (i64.const 5000)))
             (then (call $fail))))
 
     (func (export "_start")
@@ -65,7 +78,7 @@
                 (br_if $found (i64.ne (local.get $other) (call $node_id)))
                 (local.set $i (i32.add (local.get $i) (i32.const 1)))
                 (br $search)))
-        (call $spawns_fail (i64.const 1000000))
+        (call $requests_fail (i64.const 1000000))
 
         (if (call $spawn (local.get $other) (i64.const -1) (call $module_id)
                 (i32.const 16) (i32.const 6) (i32.const 128) (i32.const 0) (i32.const 192))
@@ -74,7 +87,7 @@
         (call $print (i32.const 32) (i32.const 11))
         (if (i32.ne (call $receive (i32.const 0) (i32.const 0) (i64.const 30000)) (i32.const 2))
             (then (call $fail)))
-        (call $spawns_fail (local.get $other))
+        (call $requests_fail (local.get $other))
         (call $print (i32.const 48) (i32.const 13)))
 
     (func (export "waiter")
