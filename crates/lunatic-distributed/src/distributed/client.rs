@@ -126,6 +126,7 @@ impl Client {
         )
     }
 
+    // Queues a message. If `track_response`, its response can be awaited with `await_response`.
     async fn new_message(
         &self,
         env: EnvironmentId,
@@ -133,6 +134,7 @@ impl Client {
         node: NodeId,
         dest: ProcessId,
         data: Bytes,
+        track_response: bool,
     ) -> Result<MessageId> {
         // Lazy initialize process message buffers
         let tx = message_queue(&self.inner.buf_tx, &self.inner.buf_rx, env, src);
@@ -157,6 +159,12 @@ impl Client {
             self.inner.nodes_queues.insert(node, send);
         }
         let message_id = self.next_message_id();
+        // Register the response before queueing the message, so that it can't arrive first.
+        if track_response {
+            self.inner
+                .responses
+                .insert(message_id, Arc::new((AsyncCell::new(), Instant::now())));
+        }
         match tx
             .send(MessageCtx {
                 message_id,
@@ -183,6 +191,16 @@ impl Client {
 
     // Send distributed message
     pub async fn send(&self, params: SendParams) -> Result<MessageId> {
+        self.send_message(params, false).await
+    }
+
+    // Send distributed message, and track its delivery: `await_response` returns
+    // `ResponseContent::Sent` once it was delivered, or the error that prevented it.
+    pub async fn send_tracked(&self, params: SendParams) -> Result<MessageId> {
+        self.send_message(params, true).await
+    }
+
+    async fn send_message(&self, params: SendParams, track_response: bool) -> Result<MessageId> {
         let message = Request::Message {
             node_id: self.node_id.0,
             environment_id: params.env.0,
@@ -200,6 +218,7 @@ impl Client {
             params.node,
             params.dest,
             data.into(),
+            track_response,
         )
         .await
     }
@@ -211,19 +230,15 @@ impl Client {
             Ok(data) => data,
             Err(_) => unreachable!("lunatic::distributed::client::spawn serialize_message"),
         };
-        let message_id = self
-            .new_message(
-                params.env,
-                params.src,
-                params.node,
-                ProcessId(0),
-                data.into(),
-            )
-            .await?;
-        self.inner
-            .responses
-            .insert(message_id, Arc::new((AsyncCell::new(), Instant::now())));
-        Ok(message_id)
+        self.new_message(
+            params.env,
+            params.src,
+            params.node,
+            ProcessId(0),
+            data.into(),
+            true,
+        )
+        .await
     }
 
     // Send distributed response message
@@ -239,6 +254,7 @@ impl Client {
             params.node_id,
             ProcessId(0),
             data.into(),
+            false,
         )
         .await
     }
@@ -254,6 +270,11 @@ impl Client {
 
     pub async fn await_response(&self, message_id: MessageId) -> Result<ResponseContent> {
         take_response(&self.inner.responses, message_id).await
+    }
+
+    // Stops tracking the response to a message, when it's not awaited.
+    pub fn forget_response(&self, message_id: MessageId) {
+        self.inner.responses.remove(&message_id);
     }
 }
 

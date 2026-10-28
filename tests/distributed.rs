@@ -1,5 +1,5 @@
-//! A control and two nodes, where a guest on one node keeps spawning processes on the other node,
-//! which message it back (see `wat/distributed.wat`). Fails on a timeout instead of hanging.
+//! A control and two nodes, where a guest on one node works with processes it spawns on the other
+//! node. Fails on a timeout instead of hanging.
 
 use std::{
     io::{BufRead, BufReader, Read},
@@ -16,8 +16,9 @@ use tempfile::TempDir;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 // Output lines that mean the scenario failed, on any of the processes.
-const FAILURES: [&str; 3] = [
+const FAILURES: [&str; 4] = [
     "distributed failed",
+    "dead process failed",
     "failed, notifying",
     "Error running wasm",
 ];
@@ -99,11 +100,11 @@ fn free_udp_port() -> (UdpSocket, u16) {
     (socket, port)
 }
 
-#[test]
-fn nodes_spawn_processes_on_each_other() {
+// Runs the guest `wat` on node B, until it prints `success`.
+fn run_guest(wat: &str, success: &str) {
     let dir = TempDir::new().unwrap();
-    let guest = wat::parse_file(concat!(env!("CARGO_MANIFEST_DIR"), "/wat/distributed.wat"));
-    std::fs::write(dir.path().join("guest.wasm"), guest.unwrap()).unwrap();
+    let guest = wat::parse_file(Path::new(env!("CARGO_MANIFEST_DIR")).join(wat)).unwrap();
+    std::fs::write(dir.path().join("guest.wasm"), guest).unwrap();
 
     let (sender, lines) = mpsc::channel();
     let mut output = Output {
@@ -148,5 +149,18 @@ fn nodes_spawn_processes_on_each_other() {
         ],
         &sender,
     );
-    output.wait_for("node B", "distributed ok");
+    output.wait_for("node B", success);
+}
+
+// Spawns processes on the other node and exchanges messages with them (`wat/distributed.wat`).
+#[test]
+fn nodes_spawn_processes_on_each_other() {
+    run_guest("wat/distributed.wat", "distributed ok");
+}
+
+// Requests to and messages for a process that exited on the other node
+// (`wat/dead_process.wat`).
+#[test]
+fn messages_to_dead_processes_are_dropped() {
+    run_guest("wat/dead_process.wat", "dead process ok");
 }

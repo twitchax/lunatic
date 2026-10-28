@@ -7,7 +7,7 @@ use lunatic_distributed::{
     distributed::{
         self,
         client::{EnvironmentId, NodeId, ProcessId, SendParams, SpawnParams},
-        message::{ClientError, Spawn, Val},
+        message::{ClientError, ResponseContent, Spawn, Val},
     },
     CertAttrs, DistributedCtx, SUBJECT_DIR_ATTRS,
 };
@@ -601,28 +601,44 @@ where
                 tag,
                 data: buffer,
             };
-            let code = match state.distributed()?.node_client.send(send_params).await {
-                Ok(_) => Ok(0),
-                Err(error) => Err(anyhow!(error)),
-            }?;
+            let node_client = state.distributed()?.node_client.clone();
+            let message_id = node_client
+                .send_tracked(send_params)
+                .await
+                .map_err(|error| anyhow!(error))?;
 
-            if code != 0 {
-                return Ok(code);
-            }
-
+            // Wait for the reply, unless the receiving node reports that the process doesn't
+            // exist: then no reply will ever come.
+            let process_not_found = async {
+                match node_client.await_response(message_id).await {
+                    Ok(ResponseContent::Error(ClientError::ProcessNotFound)) => {}
+                    // Delivered, or the delivery is unknown. Keep waiting for the reply.
+                    _ => std::future::pending().await,
+                }
+            };
             let tags = [wait_on_tag];
             let pop_skip_search = caller.data_mut().mailbox().pop_skip_search(Some(&tags));
-            if let Ok(message) = match timeout_duration {
+            let reply = async {
+                tokio::select! {
+                    message = pop_skip_search => Some(message),
+                    () = process_not_found => None,
+                }
+            };
+            let reply = match timeout_duration {
                 // Without timeout
-                u64::MAX => Ok(pop_skip_search.await),
+                u64::MAX => Ok(reply.await),
                 // With timeout
-                t => timeout(Duration::from_millis(t), pop_skip_search).await,
-            } {
-                // Put the message into the scratch area
-                caller.data_mut().message_scratch_area().replace(message);
-                Ok(0)
-            } else {
-                Ok(9027)
+                t => timeout(Duration::from_millis(t), reply).await,
+            };
+            node_client.forget_response(message_id);
+            match reply {
+                Ok(Some(message)) => {
+                    // Put the message into the scratch area
+                    caller.data_mut().message_scratch_area().replace(message);
+                    Ok(0)
+                }
+                Ok(None) => Ok(1),
+                Err(_) => Ok(9027),
             }
         } else {
             Err(anyhow!("Only Message::Data can be sent across nodes."))
