@@ -24,6 +24,7 @@ pub trait Environment: Send + Sync {
 pub trait Environments: Send + Sync {
     type Env: Environment;
 
+    /// Creates the environment with the given ID, or returns it if it already exists.
     async fn create(&self, id: u64) -> Result<Arc<Self::Env>>;
     async fn get(&self, id: u64) -> Option<Arc<Self::Env>>;
 }
@@ -106,8 +107,13 @@ pub struct LunaticEnvironments {
 impl Environments for LunaticEnvironments {
     type Env = LunaticEnvironment;
     async fn create(&self, id: u64) -> Result<Arc<Self::Env>> {
-        let env = Arc::new(LunaticEnvironment::new(id));
-        self.envs.insert(id, env.clone());
+        // Nodes create environments on demand, e.g. when processes are spawned into them from
+        // other nodes, concurrently. Replacing an environment would make its processes unreachable.
+        let env = self
+            .envs
+            .entry(id)
+            .or_insert_with(|| Arc::new(LunaticEnvironment::new(id)))
+            .clone();
         #[cfg(feature = "metrics")]
         metrics::gauge!("lunatic.process.environment.count").set(self.envs.len() as f64);
         Ok(env)
@@ -115,5 +121,36 @@ impl Environments for LunaticEnvironments {
 
     async fn get(&self, id: u64) -> Option<Arc<Self::Env>> {
         self.envs.get(&id).map(|e| e.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creating_an_existing_environment_returns_it() {
+        let envs = LunaticEnvironments::default();
+        let env = envs.create(1).await.unwrap();
+        assert!(Arc::ptr_eq(&env, &envs.create(1).await.unwrap()));
+        assert!(Arc::ptr_eq(&env, &envs.get(1).await.unwrap()));
+        assert!(!Arc::ptr_eq(&env, &envs.create(2).await.unwrap()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrently_created_environments_are_the_same_environment() {
+        let envs = LunaticEnvironments::default();
+        let creating: Vec<_> = (0..16)
+            .map(|_| {
+                let envs = envs.clone();
+                tokio::spawn(async move { envs.create(1).await.unwrap() })
+            })
+            .collect();
+        for created in creating {
+            assert!(Arc::ptr_eq(
+                &created.await.unwrap(),
+                &envs.get(1).await.unwrap()
+            ));
+        }
     }
 }
