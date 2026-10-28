@@ -109,8 +109,12 @@ pub async fn run_wasm(args: RunWasm) -> Result<()> {
         path.to_string_lossy()
     ))?;
 
-    // Wait on the main process to finish
-    task.await.map(|_| ()).map_err(|e| anyhow!(e.to_string()))
+    // Wait on the main process to finish. Its failure was already logged, but must still make the
+    // command fail.
+    task.await
+        .map_err(|e| anyhow!(e.to_string()))?
+        .map(|_| ())
+        .map_err(|_| anyhow!("Process {}::_start() failed", path.to_string_lossy()))
 }
 
 #[cfg(feature = "prometheus")]
