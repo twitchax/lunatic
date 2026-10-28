@@ -768,6 +768,72 @@ mod tests {
         spawn_hello(wat, config, None).await.await.unwrap().unwrap();
     }
 
+    // Links to processes that don't exist report it once, as a message here.
+    #[tokio::test]
+    async fn links_to_missing_processes_report_it() {
+        use lunatic_process_api::ProcessConfigCtx;
+
+        let wat = r#"
+            (module
+                (import "lunatic::process" "link" (func $link (param i64 i64)))
+                (import "lunatic::process" "die_when_link_dies" (func $die_when_link_dies (param i32)))
+                (import "lunatic::process" "spawn"
+                    (func $spawn (param i64 i64 i64 i32 i32 i32 i32 i32) (result i32)))
+                (import "lunatic::process" "sleep_ms" (func $sleep_ms (param i64)))
+                (import "lunatic::message" "get_tag" (func $get_tag (result i64)))
+                (import "lunatic::message" "receive"
+                    (func $receive (param i32 i32 i64) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "child")
+                ;; Expects a single `LinkDied` message tagged `tag`.
+                (func $link_died (param $tag i64)
+                    (if (i32.ne (call $receive (i32.const 0) (i32.const 0) (i64.const 5000))
+                            (i32.const 1))
+                        (then unreachable))
+                    (if (i64.ne (call $get_tag) (local.get $tag)) (then unreachable))
+                    (if (i32.ne (call $receive (i32.const 0) (i32.const 0) (i64.const 100))
+                            (i32.const 9027))
+                        (then unreachable)))
+                (func (export "hello")
+                    (call $die_when_link_dies (i32.const 0))
+                    ;; A process that never existed.
+                    (call $link (i64.const 7) (i64.const 1000000))
+                    (call $link_died (i64.const 7))
+                    ;; A process that finished.
+                    (if (call $spawn (i64.const 0) (i64.const -1) (i64.const -1)
+                            (i32.const 16) (i32.const 5) (i32.const 0) (i32.const 0)
+                            (i32.const 192))
+                        (then unreachable))
+                    (call $sleep_ms (i64.const 100))
+                    (call $link (i64.const 8) (i64.load (i32.const 192)))
+                    (call $link_died (i64.const 8)))
+                (func (export "child")))
+        "#;
+        let mut config = crate::DefaultProcessConfig::default();
+        config.set_can_spawn_processes(true);
+        spawn_hello(wat, config, None).await.await.unwrap().unwrap();
+    }
+
+    // A link to a process that doesn't exist kills the linking process, unless it asked not to.
+    #[tokio::test]
+    async fn links_to_missing_processes_kill_by_default() {
+        let wat = r#"
+            (module
+                (import "lunatic::process" "link" (func $link (param i64 i64)))
+                (import "lunatic::message" "receive"
+                    (func $receive (param i32 i32 i64) (result i32)))
+                (func (export "hello")
+                    (call $link (i64.const 7) (i64.const 1000000))
+                    (drop (call $receive (i32.const 0) (i32.const 0) (i64.const -1)))))
+        "#;
+        let task = spawn_hello(wat, Default::default(), None).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("the process wasn't killed")
+            .unwrap();
+        assert!(result.is_err());
+    }
+
     // A spawn under a name that fails leaves the name free.
     #[tokio::test]
     async fn failed_named_spawns_dont_register_the_name() {

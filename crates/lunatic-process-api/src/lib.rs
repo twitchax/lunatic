@@ -941,13 +941,11 @@ fn environment_id<T: ProcessState + ProcessCtx<T>>(caller: Caller<T>) -> u64 {
     caller.data().environment().id()
 }
 
-// Link current process to **process_id**. This is not an atomic operation, any of the 2 processes
-// could fail before processing the `Link` signal and may not notify the other.
-//
-// Traps:
-// * If the process ID doesn't exist.
+// Link current process to **process_id**. If the process doesn't exist, this process gets a
+// `LinkDied` signal with `DeathReason::NoProcess` right away, which kills it or turns into a
+// message, depending on `die_when_link_dies`.
 fn link<T: ProcessState + ProcessCtx<T>>(
-    mut caller: Caller<T>,
+    caller: Caller<T>,
     tag: i64,
     process_id: u64,
 ) -> Result<()> {
@@ -957,31 +955,25 @@ fn link<T: ProcessState + ProcessCtx<T>>(
     };
     // Create handle to itself
     let id = caller.data().id();
-    let signal_mailbox = caller.data().signal_mailbox().clone();
-    let this_process = WasmProcess::new(id, signal_mailbox.0);
+    let signal_mailbox = caller.data().signal_mailbox().0.clone();
+    let this_process = WasmProcess::new(id, signal_mailbox.clone());
 
-    // Send link signal to other process
-    let process = caller.data().environment().get_process(process_id);
+    let environment = caller.data().environment();
+    let linked = match environment.get_process(process_id) {
+        Some(process) => {
+            // Link to the process before it can notify this one of its death, which unlinks it.
+            signal_mailbox.send(Signal::Link(tag, process)).ok();
+            // Sent while the process is in its environment, so that it notifies this process even
+            // if it finishes meanwhile.
+            environment.send(process_id, Signal::Link(tag, Arc::new(this_process)))
+        }
+        None => false,
+    };
 
-    if let Some(process) = process {
-        process.send(Signal::Link(tag, Arc::new(this_process)));
-
-        // Send link signal to itself
-        caller
-            .data_mut()
-            .signal_mailbox()
-            .0
-            .send(Signal::Link(tag, process))
-            .expect("The Link signal is sent to itself and the receiver must exist at this point");
-    } else {
-        caller
-            .data_mut()
-            .signal_mailbox()
-            .0
+    if !linked {
+        signal_mailbox
             .send(Signal::LinkDied(process_id, tag, DeathReason::NoProcess))
-            .expect(
-                "The LinkDied signal is sent to itself and the receiver must exist at this point",
-            );
+            .ok();
     }
     Ok(())
 }

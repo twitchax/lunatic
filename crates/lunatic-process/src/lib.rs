@@ -400,7 +400,7 @@ where
     };
 
     env.remove_process(id);
-    add_late_monitors(&mut signal_mailbox, &mut monitors);
+    add_late_links_and_monitors(&mut signal_mailbox, &mut links, &mut monitors);
 
     let result = match result {
         Finished::Normal(result) => {
@@ -460,16 +460,23 @@ where
     result
 }
 
-// Monitors that arrived after the process finished are notified too. Signals sent after the
-// mailbox is closed are lost, but by then the process isn't in its environment anymore, which
-// monitors check for.
-fn add_late_monitors(
+// Links and monitors that arrived after the process finished are notified too. Signals sent after
+// the mailbox is closed are lost, but by then the process isn't in its environment anymore, which
+// linking and monitoring processes check for.
+fn add_late_links_and_monitors(
     signal_mailbox: &mut UnboundedReceiver<Signal>,
+    links: &mut HashMap<u64, (Arc<dyn Process>, Option<i64>)>,
     monitors: &mut HashMap<u64, Arc<dyn Process>>,
 ) {
     signal_mailbox.close();
     while let Ok(signal) = signal_mailbox.try_recv() {
         match signal {
+            Signal::Link(tag, proc) => {
+                links.insert(proc.id(), (proc, tag));
+            }
+            Signal::UnLink { process_id } => {
+                links.remove(&process_id);
+            }
             Signal::Monitor(proc) => {
                 monitors.insert(proc.id(), proc);
             }
@@ -600,10 +607,15 @@ mod tests {
     }
 
     #[test]
-    fn monitors_that_arrive_after_the_process_finished_are_notified() {
+    fn links_and_monitors_that_arrive_after_the_process_finished_are_notified() {
         let (sender, mut signal_mailbox) = unbounded_channel();
+        let mut links = HashMap::from([(1, (process(1), None))]);
         let mut monitors = HashMap::from([(1, process(1))]);
         for signal in [
+            Signal::Link(Some(5), process(2)),
+            Signal::Link(None, process(3)),
+            Signal::UnLink { process_id: 1 },
+            Signal::UnLink { process_id: 3 },
             Signal::Monitor(process(2)),
             Signal::Monitor(process(3)),
             Signal::StopMonitoring { process_id: 1 },
@@ -613,7 +625,9 @@ mod tests {
             sender.send(signal).unwrap();
         }
 
-        add_late_monitors(&mut signal_mailbox, &mut monitors);
+        add_late_links_and_monitors(&mut signal_mailbox, &mut links, &mut monitors);
+        assert_eq!(links.keys().collect::<Vec<_>>(), vec![&2]);
+        assert_eq!(links[&2].1, Some(5));
         assert_eq!(monitors.keys().collect::<Vec<_>>(), vec![&2]);
         // Later signals are dropped.
         assert!(sender.send(Signal::Monitor(process(4))).is_err());
