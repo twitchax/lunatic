@@ -354,9 +354,9 @@ where
 //
 // Returns:
 // * 0      on success - The ID of the newly created process is written to `id_ptr`
-// * 1      If node does not exist
+// * 1      If node does not exist: it isn't in the cluster, or left it
 // * 2      If module does not exist
-// * 9027   If node connection error occurred
+// * 9027   If node connection error occurred, e.g. the node left the cluster during the spawn
 //
 // Traps:
 // * If the function string is not a valid utf8 string.
@@ -417,7 +417,7 @@ where
 //                       process to `id_ptr`
 // * 2      If a process is registered under `name` - Its node ID is written to `node_id_ptr`, and
 //                       its ID to `id_ptr`
-// * 1      If node does not exist   - The error ID is written to `id_ptr`
+// * 1      If node does not exist (see `spawn`) - The error ID is written to `id_ptr`
 // * 3      If module does not exist - The error ID is written to `id_ptr`
 // * 9027   If node connection error occurred - The error ID is written to `id_ptr`
 //
@@ -564,6 +564,11 @@ where
 
     log::debug!("Spawn on node {node_id}, mod {module_id}, fn {function}, params {params:?}");
 
+    let node_client = state.distributed()?.node_client.clone();
+    if !node_client.is_in_cluster(NodeId(node_id)).await {
+        return Ok(Err(ClientError::NodeNotFound));
+    }
+
     let self_node_id = state.distributed()?.node_id();
     let spawn_params = SpawnParams {
         env: EnvironmentId(state.environment_id()),
@@ -578,7 +583,6 @@ where
             config,
         },
     };
-    let node_client = state.distributed()?.node_client.clone();
     let spawn_response = node_client
         .spawn(spawn_params)
         .await

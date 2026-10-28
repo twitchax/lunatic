@@ -220,3 +220,21 @@ async fn monitored_processes_notify_their_remote_monitors_once() {
         signal => panic!("unexpected signal {signal:?}"),
     }
 }
+
+#[tokio::test]
+async fn nodes_are_in_the_cluster_until_they_leave() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let control_url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(control_server_from_tcp(listener));
+    let (_, node_client) = start_node(&control_url).await;
+
+    // A node that joined after this node's last refresh.
+    let (joining, _) = start_node(&control_url).await;
+    let joining = NodeId(joining.node_id());
+    assert!(node_client.is_in_cluster(joining).await);
+    assert!(!node_client.is_in_cluster(NodeId(1_000_000)).await);
+
+    let (leaving, _) = start_node(&control_url).await;
+    leaving.notify_node_stopped().await.unwrap();
+    assert!(!node_client.is_in_cluster(NodeId(leaving.node_id())).await);
+}

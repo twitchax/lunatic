@@ -297,6 +297,16 @@ impl Client {
         Ok(())
     }
 
+    /// Whether `node` is in the cluster. Refreshes the node list if it isn't, since the node may
+    /// have joined since the last refresh.
+    pub async fn is_in_cluster(&self, node: NodeId) -> bool {
+        if !self.node_is_gone(node) {
+            return true;
+        }
+        self.inner.control_client.refresh_nodes().await.ok();
+        !self.node_is_gone(node)
+    }
+
     // Whether the control server stopped listing the node, e.g. because the node stopped.
     pub(crate) fn node_is_gone(&self, node: NodeId) -> bool {
         !self.inner.control_client.node_ids().contains(&node.0)
@@ -348,14 +358,12 @@ impl Client {
             self.send_monitor(monitor);
             return;
         }
-        // The node may have joined since the node list was refreshed.
         let client = self.clone();
         tokio::spawn(async move {
-            client.inner.control_client.refresh_nodes().await.ok();
-            if client.node_is_gone(monitor.node) {
-                client.remote_process_died(monitor);
-            } else {
+            if client.is_in_cluster(monitor.node).await {
                 client.send_monitor(monitor);
+            } else {
+                client.remote_process_died(monitor);
             }
         });
     }
