@@ -12,7 +12,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
-    Notify, RwLock,
+    Notify,
 };
 
 use crate::{
@@ -69,7 +69,7 @@ pub struct MessageCtx {
 }
 
 // Receiving part of the message queue
-type BufRx = RwLock<Receiver<MessageCtx>>;
+pub(crate) type BufRx = Receiver<MessageCtx>;
 
 type IncomingResponse = (AsyncCell<ResponseContent>, Instant);
 
@@ -141,11 +141,11 @@ impl Client {
                 let (send, recv) = tokio::sync::mpsc::channel(1_000_000);
                 match self.inner.buf_rx.get(&env) {
                     Some(env_queue) => {
-                        env_queue.insert(src, RwLock::new(recv));
+                        env_queue.insert(src, recv);
                     }
                     None => {
                         let queue = DashMap::new();
-                        queue.insert(src, RwLock::new(recv));
+                        queue.insert(src, recv);
                         self.inner.buf_rx.insert(env, queue);
                     }
                 };
