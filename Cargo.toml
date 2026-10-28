@@ -81,6 +81,7 @@ zip = "9"
 criterion = { version = "0.8", features = ["async_tokio"] }
 metrics = { workspace = true }
 metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
+tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 wat = "1.0"
 
