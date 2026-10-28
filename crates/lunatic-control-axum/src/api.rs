@@ -23,6 +23,8 @@ pub enum ApiError {
     Internal,
     NotAuthenticated,
     NotAuthorized,
+    // The node's lease ran out, so it's no longer part of the cluster.
+    NodeExpired,
     InvalidData(String),
     InvalidPathArg(String),
     InvalidQueryArg(String),
@@ -38,6 +40,7 @@ impl ApiError {
             ApiError::Internal => "internal",
             ApiError::NotAuthenticated => "unauthenticated",
             ApiError::NotAuthorized => "unauthorized",
+            ApiError::NodeExpired => "node_expired",
             ApiError::InvalidData(_) => "invalid_data",
             ApiError::InvalidPathArg(_) => "invalid_path_arg",
             ApiError::InvalidQueryArg(_) => "invalid_query_arg",
@@ -50,6 +53,7 @@ impl ApiError {
             ApiError::Internal => "".into(),
             ApiError::NotAuthenticated => "Not authenticated".into(),
             ApiError::NotAuthorized => "Not authorized".into(),
+            ApiError::NodeExpired => "The node's lease expired".into(),
             ApiError::InvalidData(msg) => msg.clone(),
             ApiError::InvalidPathArg(msg) => msg.clone(),
             ApiError::InvalidQueryArg(msg) => msg.clone(),
@@ -105,6 +109,7 @@ impl IntoResponse for ApiError {
             Self::Internal => S::INTERNAL_SERVER_ERROR,
             Self::NotAuthenticated => S::UNAUTHORIZED,
             Self::NotAuthorized => S::FORBIDDEN,
+            Self::NodeExpired => S::GONE,
             InvalidData(_) | InvalidPathArg(_) | InvalidQueryArg(_) | Custom { .. } => {
                 S::BAD_REQUEST
             }
@@ -284,6 +289,9 @@ where
             .find(|r| r.node_name == node_name && r.authentication_token == token)
             .map(|r| (*r.key(), r.value().clone()))
             .ok_or(ApiError::NotAuthenticated)?;
+        // Every authenticated request renews the node's lease.
+        cs.renew_lease(registration_id)
+            .map_err(|_| ApiError::NodeExpired)?;
         let node_auth = NodeAuth {
             registration_id: registration_id as i64,
             node_name: reg.node_name,

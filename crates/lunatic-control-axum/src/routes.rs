@@ -118,7 +118,7 @@ pub async fn list_nodes(
     let nds: Vec<_> = control
         .nodes
         .iter()
-        .filter(|n| n.status < 2 && !n.node_address.is_empty())
+        .filter(|n| control.is_live(n) && !n.node_address.is_empty())
         .collect();
     // Filter nodes based on query params and node attributes
     let nds: Vec<_> = if !query.is_empty() {
