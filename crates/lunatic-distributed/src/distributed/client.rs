@@ -9,7 +9,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use async_cell::sync::AsyncCell;
 use bytes::Bytes;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     Notify,
@@ -135,24 +135,7 @@ impl Client {
         data: Bytes,
     ) -> Result<MessageId> {
         // Lazy initialize process message buffers
-        let tx = match self.inner.buf_tx.get(&(env, src)) {
-            Some(tx) => tx,
-            None => {
-                let (send, recv) = tokio::sync::mpsc::channel(1_000_000);
-                match self.inner.buf_rx.get(&env) {
-                    Some(env_queue) => {
-                        env_queue.insert(src, recv);
-                    }
-                    None => {
-                        let queue = DashMap::new();
-                        queue.insert(src, recv);
-                        self.inner.buf_rx.insert(env, queue);
-                    }
-                };
-                self.inner.buf_tx.insert((env, src), send);
-                self.inner.buf_tx.get(&(env, src)).unwrap()
-            }
-        };
+        let tx = message_queue(&self.inner.buf_tx, &self.inner.buf_rx, env, src);
 
         let node_manager_exists = self.inner.nodes_queues.get(&node).is_none();
 
@@ -283,6 +266,28 @@ impl Client {
     }
 }
 
+// Returns the sending end of a process' message queue, creating the queue on the first message.
+//
+// The sender is cloned out of the map, so that no guard of it is held while sending. The queue is
+// created atomically, because many tasks send the responses of a node (environment 0, process 0)
+// concurrently: a second queue would replace the first one, together with its messages.
+fn message_queue(
+    buf_tx: &DashMap<(EnvironmentId, ProcessId), Sender<MessageCtx>>,
+    buf_rx: &DashMap<EnvironmentId, DashMap<ProcessId, BufRx>>,
+    env: EnvironmentId,
+    src: ProcessId,
+) -> Sender<MessageCtx> {
+    match buf_tx.entry((env, src)) {
+        Entry::Occupied(tx) => tx.get().clone(),
+        Entry::Vacant(entry) => {
+            let (send, recv) = tokio::sync::mpsc::channel(1_000_000);
+            buf_rx.entry(env).or_default().insert(src, recv);
+            entry.insert(send.clone());
+            send
+        }
+    }
+}
+
 pub async fn process_responses(
     client: Client,
     mut recv: Receiver<(MessageId, ResponseContent)>,
@@ -330,9 +335,53 @@ fn expire_responses(responses: &DashMap<MessageId, Arc<IncomingResponse>>, timeo
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, thread};
+    use std::{
+        sync::{mpsc, Barrier},
+        thread,
+    };
 
     use super::*;
+
+    fn message(message_id: u64) -> MessageCtx {
+        MessageCtx {
+            message_id: MessageId(message_id),
+            env: EnvironmentId(0),
+            src: ProcessId(0),
+            node: NodeId(1),
+            dest: ProcessId(0),
+            chunk_id: AtomicU64::new(0),
+            offset: AtomicUsize::new(0),
+            data: Bytes::new(),
+        }
+    }
+
+    #[test]
+    fn concurrently_created_queues_are_the_same_queue() {
+        const SENDERS: u64 = 8;
+        for _ in 0..100 {
+            let buf_tx = DashMap::new();
+            let buf_rx = DashMap::new();
+            let start = Barrier::new(SENDERS as usize);
+            thread::scope(|scope| {
+                for message_id in 0..SENDERS {
+                    let (buf_tx, buf_rx, start) = (&buf_tx, &buf_rx, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        let queue = message_queue(buf_tx, buf_rx, EnvironmentId(0), ProcessId(0));
+                        assert!(queue.try_send(message(message_id)).is_ok());
+                    });
+                }
+            });
+
+            let env = buf_rx.get(&EnvironmentId(0)).unwrap();
+            let mut queue = env.get_mut(&ProcessId(0)).unwrap();
+            let mut received = 0;
+            while queue.try_recv().is_ok() {
+                received += 1;
+            }
+            assert_eq!(received, SENDERS);
+        }
+    }
 
     fn response(set: bool, age: Duration) -> Arc<IncomingResponse> {
         let cell = AsyncCell::new();
