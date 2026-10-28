@@ -287,7 +287,6 @@ pub async fn process_responses(
     client: Client,
     mut recv: Receiver<(MessageId, ResponseContent)>,
 ) -> ! {
-    const TIMEOUT: Duration = Duration::from_secs(5);
     loop {
         tokio::select! {
            r =  recv.recv() => {
@@ -297,22 +296,81 @@ pub async fn process_responses(
                 }
             }
            },
-           _ = tokio::time::sleep(TIMEOUT) => {
-            for entry in client.inner.responses.iter() {
-                // Clean up timeouts
-                if entry.0.is_set() && entry.1.elapsed() > TIMEOUT {
-                    client.inner.responses.remove(entry.key());
-                }
-                // Set timeout response
-                if !entry.0.is_set() && entry.1.elapsed() > TIMEOUT {
-                    entry.0.set(ResponseContent::Error(
-                        crate::distributed::message::ClientError::Unexpected(
-                            "Response timeout.".to_string(),
-                        ),
-                    ));
-                }
-            }
+           _ = tokio::time::sleep(RESPONSE_TIMEOUT) => {
+            expire_responses(&client.inner.responses, RESPONSE_TIMEOUT);
            }
         };
+    }
+}
+
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Fails the responses that didn't arrive within `timeout`, and cleans up the ones that weren't
+// taken in time after that.
+fn expire_responses(responses: &DashMap<MessageId, Arc<IncomingResponse>>, timeout: Duration) {
+    // Removing entries while iterating over the map deadlocks on its shard locks, so retain the
+    // entries to keep instead.
+    responses.retain(|_, response| {
+        let expired = response.1.elapsed() > timeout;
+        // Clean up timeouts
+        if expired && response.0.is_set() {
+            return false;
+        }
+        // Set timeout response
+        if expired {
+            response.0.set(ResponseContent::Error(
+                crate::distributed::message::ClientError::Unexpected(
+                    "Response timeout.".to_string(),
+                ),
+            ));
+        }
+        true
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, thread};
+
+    use super::*;
+
+    fn response(set: bool, age: Duration) -> Arc<IncomingResponse> {
+        let cell = AsyncCell::new();
+        if set {
+            cell.set(ResponseContent::Sent);
+        }
+        Arc::new((cell, Instant::now() - age))
+    }
+
+    #[test]
+    fn expired_responses_time_out_and_get_cleaned_up() {
+        let responses = Arc::new(DashMap::new());
+        responses.insert(MessageId(1), response(false, Duration::from_secs(10)));
+        responses.insert(MessageId(2), response(true, Duration::from_secs(10)));
+        responses.insert(MessageId(3), response(false, Duration::ZERO));
+        responses.insert(MessageId(4), response(true, Duration::ZERO));
+
+        // A deadlock would block the expiring thread for good.
+        let (done, expired) = mpsc::channel();
+        let expiring = responses.clone();
+        thread::spawn(move || {
+            expire_responses(&expiring, RESPONSE_TIMEOUT);
+            done.send(()).unwrap();
+        });
+        expired
+            .recv_timeout(Duration::from_secs(10))
+            .expect("expiring the responses deadlocked");
+
+        let mut message_ids: Vec<_> = responses.iter().map(|entry| entry.key().0).collect();
+        message_ids.sort();
+        assert_eq!(message_ids, vec![1, 3, 4]);
+        let timed_out = responses.get(&MessageId(1)).unwrap().0.try_take();
+        assert!(matches!(
+            timed_out,
+            Some(ResponseContent::Error(
+                crate::distributed::message::ClientError::Unexpected(_)
+            ))
+        ));
+        assert!(responses.get(&MessageId(3)).unwrap().0.try_take().is_none());
     }
 }
