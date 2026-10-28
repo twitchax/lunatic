@@ -1,9 +1,8 @@
 use std::{fmt::Display, sync::Arc};
 
 use axum::{
-    async_trait,
-    extract::{FromRequest, FromRequestParts, Host, Path},
-    http::{self, request::Parts, Request},
+    extract::{FromRequest, FromRequestParts, Path, Request},
+    http::{self, request::Parts, HeaderMap},
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -117,16 +116,14 @@ impl IntoResponse for ApiError {
 
 pub struct JsonExtractor<T>(pub T);
 
-#[async_trait]
-impl<S, B, T> FromRequest<S, B> for JsonExtractor<T>
+impl<S, T> FromRequest<S> for JsonExtractor<T>
 where
-    axum::Json<T>: FromRequest<S, B, Rejection = axum::extract::rejection::JsonRejection>,
+    axum::Json<T>: FromRequest<S, Rejection = axum::extract::rejection::JsonRejection>,
     S: Send + Sync,
-    B: Send + 'static,
 {
     type Rejection = ApiError;
 
-    async fn from_request(req: Request<B>, state: &S) -> Result<JsonExtractor<T>, Self::Rejection> {
+    async fn from_request(req: Request, state: &S) -> Result<JsonExtractor<T>, Self::Rejection> {
         match Json::from_request(req, state).await {
             Ok(Json(value)) => Ok(JsonExtractor(value)),
             Err(e) => Err(ApiError::InvalidData(e.to_string())),
@@ -136,7 +133,6 @@ where
 
 pub struct PathExtractor<T>(pub T);
 
-#[async_trait]
 impl<S, T> FromRequestParts<S> for PathExtractor<T>
 where
     S: Send + Sync,
@@ -157,7 +153,6 @@ where
 
 pub struct HostExtractor(pub String);
 
-#[async_trait]
 impl<S> FromRequestParts<S> for HostExtractor
 where
     S: Send + Sync,
@@ -166,16 +161,57 @@ where
 
     async fn from_request_parts(
         req: &mut Parts,
-        state: &S,
+        _state: &S,
     ) -> Result<HostExtractor, Self::Rejection> {
-        match Host::from_request_parts(req, state).await {
-            Ok(Host(host)) => Ok(HostExtractor(host)),
-            Err(e) => Err(ApiError::Custom {
+        match host(req) {
+            Some(host) => Ok(HostExtractor(host.to_owned())),
+            None => Err(ApiError::Custom {
                 code: "no_host",
-                message: Some(e.to_string()),
+                message: Some("No host found in request".into()),
             }),
         }
     }
+}
+
+// Resolves the host the way axum's former `Host` extractor did, which axum no longer provides.
+fn host(req: &Parts) -> Option<&str> {
+    if let Some(host) = forwarded_host(&req.headers) {
+        return Some(host);
+    }
+
+    if let Some(host) = req
+        .headers
+        .get("X-Forwarded-Host")
+        .and_then(|host| host.to_str().ok())
+    {
+        return Some(host);
+    }
+
+    if let Some(host) = req
+        .headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+    {
+        return Some(host);
+    }
+
+    req.uri.host()
+}
+
+fn forwarded_host(headers: &HeaderMap) -> Option<&str> {
+    // If there are multiple `Forwarded` headers, `HeaderMap::get` returns the first one.
+    let forwarded_values = headers.get(header::FORWARDED)?.to_str().ok()?;
+
+    // Get the first set of values.
+    let first_value = forwarded_values.split(',').next()?;
+
+    // Find the value of the `host` field.
+    first_value.split(';').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("host")
+            .then(|| value.trim().trim_matches('"'))
+    })
 }
 
 #[derive(Debug)]
@@ -184,7 +220,6 @@ pub struct NodeAuth {
     pub node_name: uuid::Uuid,
 }
 
-#[async_trait]
 impl<S> FromRequestParts<S> for NodeAuth
 where
     S: Send + Sync,
@@ -255,5 +290,38 @@ where
         };
 
         Ok(node_auth)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts(uri: &str, headers: &[(&str, &str)]) -> Parts {
+        let mut request = http::Request::builder().uri(uri);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.body(()).unwrap().into_parts().0
+    }
+
+    #[test]
+    fn host_prefers_forwarded_headers() {
+        let all = [
+            (
+                "Forwarded",
+                "for=1.2.3.4; host=\"forwarded:1\";proto=http, host=second",
+            ),
+            ("X-Forwarded-Host", "x-forwarded:2"),
+            ("Host", "host:3"),
+        ];
+        assert_eq!(host(&parts("http://uri:4/", &all)), Some("forwarded:1"));
+        assert_eq!(
+            host(&parts("http://uri:4/", &all[1..])),
+            Some("x-forwarded:2")
+        );
+        assert_eq!(host(&parts("http://uri:4/", &all[2..])), Some("host:3"));
+        assert_eq!(host(&parts("http://uri:4/", &[])), Some("uri"));
+        assert_eq!(host(&parts("/", &[])), None);
     }
 }

@@ -135,7 +135,7 @@ bincode = "1.3"
 dashmap = "5.4"
 log = "0.4"
 metrics = "0.20.1"
-reqwest = {version = "0.11.18", features = ["cookies", "multipart"]}
+reqwest = { version = "0.13", default-features = false, features = ["charset", "cookies", "http2", "multipart", "native-tls", "system-proxy"] }
 serde = "1.0"
 tokio = "1.28"
 uuid = { version = "1.1", features = ["v4"] }

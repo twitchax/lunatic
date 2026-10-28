@@ -112,7 +112,7 @@ fn prepare_app() -> Result<Router> {
         lunatic_distributed::quic::new_quic_client(&ca_cert_str, &ctrl_cert, &ctrl_pk)?;
     let control = Arc::new(ControlServer::new(ca_cert, quic_client));
     let app = Router::new()
-        .nest("/", routes::init_routes())
+        .merge(routes::init_routes())
         .layer(Extension(control));
     Ok(app)
 }
@@ -124,8 +124,7 @@ pub async fn control_server(http_socket: SocketAddr) -> Result<()> {
 pub async fn control_server_from_tcp(listener: TcpListener) -> Result<()> {
     let app = prepare_app()?;
 
-    axum::Server::from_tcp(listener)?
-        .serve(app.into_make_service())
-        .await?;
+    listener.set_nonblocking(true)?;
+    axum::serve(tokio::net::TcpListener::from_std(listener)?, app).await?;
     Ok(())
 }

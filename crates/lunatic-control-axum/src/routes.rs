@@ -181,7 +181,7 @@ pub fn init_routes() -> Router {
         .route("/started", post(node_started))
         .route("/nodes", get(list_nodes))
         .route("/module", post(add_module))
-        .route("/module/:id", get(get_module))
+        .route("/module/{id}", get(get_module))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(50 * 1024 * 1024)) // 50 mb
 }
