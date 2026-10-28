@@ -240,6 +240,11 @@ pub struct NodeConnectionManager {
     pub message_chunks: Receiver<MessageChunk>,
 }
 
+// How long to wait for the peer to let a stream be opened.
+const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(1);
+// How long to wait before reconnecting when no stream could be opened.
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+
 pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Result<()> {
     let node_info = manager.node_info;
     log::trace!(
@@ -247,11 +252,8 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
         node_info.id,
         node_info.address
     );
-    // Setup stream buffer
-    let mut buffers: Vec<StreamBuffer> = Vec::with_capacity(manager.streams);
-    for _ in 0..manager.streams {
-        buffers.push(Arc::new(RwLock::new(VecDeque::new())));
-    }
+    // The chunks that the streams of the previous connection didn't send.
+    let mut unsent: Vec<StreamBuffer> = Vec::new();
     // Setup stream dead waker
     let (dead_stream_notifier, mut dead_stream_waker) = mpsc::channel::<()>(1);
 
@@ -279,21 +281,50 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
             node_info.name,
             node_info.address
         );
+        // Open as many streams as the peer lets us, up to `manager.streams`.
+        let mut quic_streams = Vec::with_capacity(manager.streams);
+        while quic_streams.len() < manager.streams {
+            match tokio::time::timeout(STREAM_OPEN_TIMEOUT, conn.open_uni()).await {
+                Ok(Ok(stream)) => quic_streams.push(stream),
+                Ok(Err(e)) => {
+                    log::error!("congestion::node_connection_manager Stream open failed: {e}");
+                    break;
+                }
+                Err(_) => {
+                    log::error!("congestion::node_connection_manager Stream open timed out");
+                    break;
+                }
+            }
+        }
+        if quic_streams.is_empty() {
+            // The connection is unusable without streams.
+            tokio::time::sleep(RECONNECT_DELAY).await;
+            continue;
+        }
+        // Setup stream buffers, starting with the chunks the previous connection didn't send.
+        let buffers: Vec<StreamBuffer> = quic_streams
+            .iter()
+            .map(|_| Arc::new(RwLock::new(VecDeque::new())))
+            .collect();
+        for previous in unsent.drain(..) {
+            let mut previous = previous.write().await;
+            // Oldest chunks first, so that the chunks of each process pair stay in order.
+            while let Some(chunk) = previous.pop_back() {
+                let stream_index = stream_index(&chunk, buffers.len());
+                buffers[stream_index].write().await.push_front(chunk);
+            }
+        }
         // Start stream tasks
         let mut stream_tasks = Vec::new();
         let mut stream_wakers = Vec::new();
-        for buffer in buffers.iter().take(manager.streams) {
-            let stream = match conn.open_uni().await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    log::error!("congestion::node_connection_manager Stream open failed: {e}");
-                    continue;
-                }
-            };
+        for (quic_stream, buffer) in quic_streams.into_iter().zip(&buffers) {
             let (send, recv) = mpsc::channel::<StreamAction>(1000);
+            if !buffer.read().await.is_empty() {
+                send.try_send(StreamAction::Message).ok();
+            }
             stream_wakers.push(send);
             stream_tasks.push(tokio::spawn(stream_task(StreamTask {
-                quic_stream: stream,
+                quic_stream,
                 action: recv,
                 manager_notifier: dead_stream_notifier.clone(),
                 buffer: buffer.clone(),
@@ -309,11 +340,7 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
                         break 'forward_chunks;
                     };
                     log::trace!("congestion::node_connection_manager::msg_id {}", chunk.message_id);
-                    let src = chunk.src.0;
-                    let dest = chunk.dest.0;
-                    // Determine stream index by source and destination process_id
-                    // This ensures that all messages arrive in order between processes
-                    let stream_index = ((src ^ dest) % manager.streams as u64) as usize;
+                    let stream_index = stream_index(&chunk, buffers.len());
                     // Push data into message buffer
                     buffers[stream_index].write().await.push_front(chunk);
                     // Wake up stream task
@@ -332,11 +359,18 @@ pub async fn node_connection_manager(mut manager: NodeConnectionManager) -> Resu
         for task in stream_tasks {
             task.await.ok();
         }
+        unsent = buffers;
         if node_is_gone {
             stop_connection_manager(&node_info, &mut manager.message_chunks);
             return Ok(());
         }
     }
+}
+
+// The stream of a chunk, by its source and destination process, so that all messages between two
+// processes arrive in order.
+fn stream_index(chunk: &MessageChunk, streams: usize) -> usize {
+    ((chunk.src.0 ^ chunk.dest.0) % streams as u64) as usize
 }
 
 // Drops the chunks still queued for a gone node.
@@ -403,7 +437,7 @@ async fn stream_task(mut state: StreamTask) {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         sync::{
             atomic::{AtomicU64, AtomicUsize},
             Mutex,
@@ -672,5 +706,110 @@ mod tests {
         }
         assert_eq!(chunk_ids, vec![(1, 0), (1, 1), (1, 2), (2, 0)]);
         assert!(queues.buf_rx.get(&EnvironmentId(0)).unwrap().is_empty());
+    }
+
+    // A server whose connections let a client open up to `streams` unidirectional streams, and a
+    // client for it.
+    fn quic_server(streams: u32) -> (quinn::Endpoint, quic::Client) {
+        let certified = rcgen::generate_simple_self_signed(vec!["node".to_string()]).unwrap();
+        let (cert, key) = (certified.cert.pem(), certified.signing_key.serialize_pem());
+        let mut config = quic::quic_server_config(vec![cert.clone()], &key, &cert).unwrap();
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_concurrent_uni_streams(streams.into());
+        config.transport_config(Arc::new(transport));
+        let server = quinn::Endpoint::server(config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let client = quic::new_quic_client(&cert, &cert, &key).unwrap();
+        (server, client)
+    }
+
+    fn connection_manager(
+        server: &quinn::Endpoint,
+        client: quic::Client,
+        message_chunks: Receiver<MessageChunk>,
+    ) -> NodeConnectionManager {
+        NodeConnectionManager {
+            streams: 10,
+            node_info: NodeInfo {
+                id: OTHER_NODE.0,
+                address: server.local_addr().unwrap(),
+                name: "node".to_string(),
+            },
+            client,
+            message_chunks,
+        }
+    }
+
+    #[tokio::test]
+    async fn chunks_are_sent_over_the_streams_that_opened() {
+        // The node only lets 3 of the 10 streams be opened.
+        let (server, client) = quic_server(3);
+        let (sender, message_chunks) = mpsc::channel(100);
+        // Messages of three chunks between ten pairs of processes, which would spread over all
+        // ten streams.
+        for chunk_id in 0..3u8 {
+            for src in 0..10 {
+                let chunk = MessageChunk {
+                    src: ProcessId(src),
+                    dest: ProcessId(0),
+                    message_id: src,
+                    message_size: 3,
+                    chunk_id: chunk_id.into(),
+                    data: bytes::Bytes::from(vec![chunk_id]),
+                };
+                assert!(sender.send(chunk).await.is_ok());
+            }
+        }
+        tokio::spawn(node_connection_manager(connection_manager(
+            &server,
+            client,
+            message_chunks,
+        )));
+
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let (received_sender, mut received) = mpsc::unbounded_channel();
+        for _ in 0..3 {
+            let mut recv = conn.accept_uni().await.unwrap();
+            let received_sender = received_sender.clone();
+            tokio::spawn(async move {
+                while let Ok(chunk) = quic::read_next_stream_chunk(&mut recv).await {
+                    received_sender.send((chunk.message_id, chunk.data[0])).ok();
+                }
+            });
+        }
+        let mut messages: HashMap<u64, Vec<u8>> = HashMap::new();
+        for _ in 0..30 {
+            let (message_id, chunk_id) =
+                tokio::time::timeout(Duration::from_secs(10), received.recv())
+                    .await
+                    .expect("the chunks weren't sent")
+                    .unwrap();
+            messages.entry(message_id).or_default().push(chunk_id);
+        }
+        // Each message's chunks arrive in order.
+        for message_id in 0..10 {
+            assert_eq!(messages[&message_id], vec![0, 1, 2]);
+        }
+    }
+
+    #[tokio::test]
+    async fn connections_without_streams_are_retried() {
+        // The node doesn't let any stream be opened.
+        let (server, client) = quic_server(0);
+        let (sender, message_chunks) = mpsc::channel(100);
+        assert!(sender.send(message_chunk()).await.is_ok());
+        let manager = tokio::spawn(node_connection_manager(connection_manager(
+            &server,
+            client,
+            message_chunks,
+        )));
+        let _conn = server.accept().await.unwrap().await.unwrap();
+
+        // The manager backs off from the unusable connection, and stops once the node is gone.
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(10), manager)
+            .await
+            .expect("the connection manager kept running")
+            .unwrap()
+            .unwrap();
     }
 }

@@ -121,6 +121,15 @@ pub fn new_quic_server(
     key: &str,
     ca_cert: &str,
 ) -> Result<Endpoint> {
+    let server_config = quic_server_config(certs, key, ca_cert)?;
+    Ok(quinn::Endpoint::server(server_config, addr)?)
+}
+
+pub(crate) fn quic_server_config(
+    certs: Vec<String>,
+    key: &str,
+    ca_cert: &str,
+) -> Result<ServerConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(parse_cert(ca_cert)?)?;
 
@@ -148,8 +157,7 @@ pub fn new_quic_server(
         .unwrap()
         .keep_alive_interval(Some(Duration::from_millis(100)))
         .max_idle_timeout(Some(max_idle_timeout()));
-
-    Ok(quinn::Endpoint::server(server_config, addr)?)
+    Ok(server_config)
 }
 
 pub async fn handle_node_server<T, E>(
@@ -247,10 +255,10 @@ async fn handle_quic_stream_node<T, E>(
     log::trace!("distributed::server::handle_quic_stream finished");
 }
 
-struct Chunk {
-    message_id: u64,
+pub(crate) struct Chunk {
+    pub(crate) message_id: u64,
     message_size: usize,
-    data: Vec<u8>,
+    pub(crate) data: Vec<u8>,
 }
 
 struct RecvCtx {
@@ -259,7 +267,7 @@ struct RecvCtx {
     chunks: DashMap<u64, (usize, Vec<u8>)>,
 }
 
-async fn read_next_stream_chunk(recv: &mut quinn::RecvStream) -> Result<Chunk> {
+pub(crate) async fn read_next_stream_chunk(recv: &mut quinn::RecvStream) -> Result<Chunk> {
     // Read chunk header info
     let mut message_id = [0u8; 8];
     let mut message_size = [0u8; 4];
