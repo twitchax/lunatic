@@ -2,6 +2,7 @@ pub mod config;
 pub mod env;
 pub mod mailbox;
 pub mod message;
+pub mod registry;
 pub mod runtimes;
 pub mod state;
 pub mod wasm;
@@ -406,11 +407,10 @@ where
             let result: ExecutionResult<_> = result.into();
 
             if let Some(failure) = result.failure() {
-                let registry = result.state().registry().read().await;
-                let name = registry
+                let names = result.state().registry().names(id);
+                let name = names
                     .iter()
-                    .filter(|(_, (_, process_id))| process_id == &id)
-                    .map(|(name, _)| name.splitn(4, '/').last().unwrap_or(name.as_str()))
+                    .map(|name| name.splitn(4, '/').last().unwrap_or(name.as_str()))
                     .collect::<NameOrID>()
                     .or_id(id);
                 warn!(

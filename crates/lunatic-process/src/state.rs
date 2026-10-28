@@ -1,16 +1,17 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 use hash_map_id::HashMapId;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
-    Mutex, RwLock,
+    Mutex,
 };
 use wasmtime::Linker;
 
 use crate::{
     config::ProcessConfig,
     mailbox::MessageMailbox,
+    registry::Registry,
     runtimes::wasmtime::{WasmtimeCompiledModule, WasmtimeRuntime},
     Signal,
 };
@@ -64,5 +65,5 @@ pub trait ProcessState: Sized + 'static {
     fn config_resources_mut(&mut self) -> &mut ConfigResources<Self::Config>;
 
     // Registry
-    fn registry(&self) -> &Arc<RwLock<HashMap<String, (u64, u64)>>>;
+    fn registry(&self) -> &Arc<Registry>;
 }

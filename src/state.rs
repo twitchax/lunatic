@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -18,7 +17,7 @@ use lunatic_process::{
     config::ProcessConfig,
     state::{SignalReceiver, SignalSender},
 };
-use lunatic_process::{mailbox::MessageMailbox, message::Message};
+use lunatic_process::{mailbox::MessageMailbox, message::Message, registry::Registry};
 use lunatic_process_api::{ProcessConfigCtx, ProcessCtx};
 use lunatic_sqlite_api::{SQLiteConnections, SQLiteCtx, SQLiteGuestAllocators, SQLiteStatements};
 use lunatic_stdout_capture::StdoutCapture;
@@ -26,7 +25,7 @@ use lunatic_timer_api::{TimerCtx, TimerResources};
 use lunatic_wasi_api::{build_wasi, LunaticWasi, LunaticWasiCtx};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc::unbounded_channel;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use wasmtime::{Linker, ResourceLimiter};
 use wasmtime_wasi::p1::WasiP1Ctx;
 
@@ -73,7 +72,7 @@ pub struct DefaultProcessState {
     initialized: bool,
     // database resources
     db_resources: DbResources,
-    registry: Arc<RwLock<HashMap<String, (u64, u64)>>>,
+    registry: Arc<Registry>,
 }
 
 impl DefaultProcessState {
@@ -83,7 +82,7 @@ impl DefaultProcessState {
         runtime: WasmtimeRuntime,
         module: Arc<WasmtimeCompiledModule<Self>>,
         config: Arc<DefaultProcessConfig>,
-        registry: Arc<RwLock<HashMap<String, (u64, u64)>>>,
+        registry: Arc<Registry>,
     ) -> Result<Self> {
         let signal_mailbox = unbounded_channel();
         let signal_mailbox = (signal_mailbox.0, Arc::new(Mutex::new(signal_mailbox.1)));
@@ -209,7 +208,7 @@ impl ProcessState for DefaultProcessState {
         &mut self.resources.configs
     }
 
-    fn registry(&self) -> &Arc<RwLock<HashMap<String, (u64, u64)>>> {
+    fn registry(&self) -> &Arc<Registry> {
         &self.registry
     }
 }
@@ -499,8 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_filter_signature_matches() {
-        use std::collections::HashMap;
-        use tokio::sync::RwLock;
+        use lunatic_process::registry::Registry;
 
         use crate::state::DefaultProcessState;
         use crate::DefaultProcessConfig;
@@ -520,7 +518,7 @@ mod tests {
         let raw_module = wat::parse_file("./wat/all_imports.wat").unwrap();
         let module = Arc::new(runtime.compile_module(raw_module.into()).unwrap());
         let env = Arc::new(lunatic_process::env::LunaticEnvironment::new(0));
-        let registry = Arc::new(RwLock::new(HashMap::new()));
+        let registry = Arc::new(Registry::default());
         let state = DefaultProcessState::new(
             env.clone(),
             None,
@@ -720,6 +718,42 @@ mod tests {
             value("histo"),
             Some(&DebugValue::Histogram(vec![3.0.into()]))
         );
+    }
+
+    // A spawn under a name that fails leaves the name free.
+    #[tokio::test]
+    async fn failed_named_spawns_dont_register_the_name() {
+        use lunatic_process_api::ProcessConfigCtx;
+
+        // Spawns itself under "name" with a config whose memory limit is below its memory.
+        let wat = r#"
+            (module
+                (import "lunatic::process" "create_config" (func $create_config (result i64)))
+                (import "lunatic::process" "config_set_max_memory"
+                    (func $config_set_max_memory (param i64 i64)))
+                (import "lunatic::process" "get_or_spawn"
+                    (func $get_or_spawn
+                        (param i32 i32 i64 i64 i64 i32 i32 i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "name")
+                (data (i32.const 24) "hello")
+                (func (export "hello")
+                    (local $config i64)
+                    (local.set $config (call $create_config))
+                    (call $config_set_max_memory (local.get $config) (i64.const 1024))
+                    (if (i32.ne (i32.const 1)
+                            (call $get_or_spawn (i32.const 16) (i32.const 4) (i64.const 0)
+                                (local.get $config) (i64.const -1) (i32.const 24) (i32.const 5)
+                                (i32.const 0) (i32.const 0) (i32.const 32) (i32.const 40)))
+                        (then unreachable))))
+        "#;
+        let mut config = crate::DefaultProcessConfig::default();
+        config.set_can_create_configs(true);
+        config.set_can_spawn_processes(true);
+        let state = spawn_hello(wat, config, None).await.await.unwrap().unwrap();
+
+        assert_eq!(state.registry.get("name"), None);
+        assert!(state.registry.reserve("name").await.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread")]

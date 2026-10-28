@@ -16,10 +16,11 @@ use tempfile::TempDir;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 // Output lines that mean the scenario failed, on any of the processes.
-const FAILURES: [&str; 6] = [
+const FAILURES: [&str; 7] = [
     "distributed failed",
     "dead process failed",
     "monitor failed",
+    "named spawn failed",
     "node down failed",
     "failed, notifying",
     "Error running wasm",
@@ -215,4 +216,11 @@ fn crashed_nodes_leave_the_cluster() {
         left_after
     );
     cluster.output.wait_for("node B", "node down ok");
+}
+
+// Processes concurrently spawning a process under the same name on another node get the same
+// process (`wat/named_spawn.wat`).
+#[test]
+fn concurrent_named_spawns_spawn_one_process() {
+    run_guest("wat/named_spawn.wat", "named spawn ok");
 }

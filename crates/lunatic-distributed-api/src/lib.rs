@@ -36,6 +36,7 @@ where
     linker.func_wrap_anyhow("lunatic::distributed", "monitor", monitor)?;
     linker.func_wrap_anyhow("lunatic::distributed", "stop_monitoring", stop_monitoring)?;
     linker.func_wrap_async_anyhow("lunatic::distributed", "spawn", spawn)?;
+    linker.func_wrap_async_anyhow("lunatic::distributed", "get_or_spawn", get_or_spawn)?;
     linker.func_wrap_async_anyhow("lunatic::distributed", "send", send)?;
     linker.func_wrap_async_anyhow(
         "lunatic::distributed",
@@ -379,99 +380,21 @@ where
     for<'a> &'a T: Send,
 {
     Box::new(async move {
-        if !caller.data().can_spawn() {
-            return Err(anyhow!(
-                "Process doesn't have permissions to spawn sub-processes"
-            ));
-        }
+        let spawned = spawn_on_node(
+            &mut caller,
+            node_id,
+            config_id,
+            module_id,
+            (func_str_ptr, func_str_len),
+            (params_ptr, params_len),
+        )
+        .await?;
+        let (process_or_error_id, ret) = match spawned {
+            Ok(process_id) => (process_id, 0),
+            Err(error) => spawn_error(caller.data_mut(), error, 2)?,
+        };
+
         let memory = get_memory(&mut caller)?;
-        let func_str = memory
-            .data(&caller)
-            .get(func_str_ptr as usize..(func_str_ptr + func_str_len) as usize)
-            .or_trap("lunatic::distributed::spawn::func_str")?;
-
-        let function =
-            std::str::from_utf8(func_str).or_trap("lunatic::distributed::spawn::func_str_utf8")?;
-
-        let params = memory
-            .data(&caller)
-            .get(params_ptr as usize..(params_ptr + params_len) as usize)
-            .or_trap("lunatic::distributed::spawn::params")?;
-        let params = params
-            .as_chunks::<17>()
-            .0
-            .iter()
-            .map(|chunk| {
-                let value = u128::from_le_bytes(chunk[1..].try_into()?);
-                let result = match chunk[0] {
-                    0x7F => Val::I32(value as i32),
-                    0x7E => Val::I64(value as i64),
-                    0x7B => Val::V128(value),
-                    _ => return Err(anyhow!("Unsupported type ID")),
-                };
-                Ok(result)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let state = caller.data();
-
-        let config = match config_id {
-            -1 => state.config().clone(),
-            config_id => Arc::new(
-                caller
-                    .data()
-                    .config_resources()
-                    .get(config_id as u64)
-                    .or_trap("lunatic::distributed::spawn: Config ID doesn't exist")?
-                    .clone(),
-            ),
-        };
-        let config: Vec<u8> =
-            rmp_serde::to_vec(config.as_ref()).map_err(|_| anyhow!("Error serializing config"))?;
-
-        log::debug!("Spawn on node {node_id}, mod {module_id}, fn {function}, params {params:?}");
-
-        let self_node_id = state.distributed()?.node_id();
-        let spawn_params = SpawnParams {
-            env: EnvironmentId(state.environment_id()),
-            src: ProcessId(state.id()),
-            node: NodeId(node_id),
-            spawn: Spawn {
-                response_node_id: self_node_id,
-                environment_id: state.environment_id(),
-                function: function.to_string(),
-                module_id,
-                params,
-                config,
-            },
-        };
-        let node_client = state.distributed()?.node_client.clone();
-        let spawn_response = node_client
-            .spawn(spawn_params)
-            .await
-            .map(|message_id| node_client.await_response(message_id))?
-            .await?;
-        let (process_or_error_id, ret) = match spawn_response {
-            distributed::message::ResponseContent::Spawned(process_id) => Ok((process_id, 0)),
-            distributed::message::ResponseContent::Error(error) => {
-                let (code, message): (u32, String) = match error {
-                    ClientError::Unexpected(cause) => Err(anyhow!(cause)),
-                    ClientError::Connection(cause) => Ok((9027, cause)),
-                    ClientError::NodeNotFound => Ok((1, "Node does not exist.".to_string())),
-                    ClientError::ModuleNotFound => Ok((2, "Module does not exist.".to_string())),
-                    ClientError::ProcessNotFound => Err(anyhow!("unreachable")),
-                }?;
-                Ok((
-                    caller
-                        .data_mut()
-                        .error_resources_mut()
-                        .add(anyhow!(message)),
-                    code,
-                ))
-            }
-            _ => Err(anyhow!("unreachable")),
-        }?;
-
         memory
             .write(
                 &mut caller,
@@ -482,6 +405,207 @@ where
 
         Ok(ret)
     })
+}
+
+// Spawns a process on node `node_id` like `spawn`, unless a process is registered under `name`
+// in this process' registry. Otherwise registers the spawned process under `name`. Concurrent
+// calls with the same `name` spawn a single process: until it's spawned, the name is reserved,
+// see `lunatic_process::registry`.
+//
+// Returns:
+// * 0      on success - `node_id` is written to `node_id_ptr`, and the ID of the newly created
+//                       process to `id_ptr`
+// * 2      If a process is registered under `name` - Its node ID is written to `node_id_ptr`, and
+//                       its ID to `id_ptr`
+// * 1      If node does not exist   - The error ID is written to `id_ptr`
+// * 3      If module does not exist - The error ID is written to `id_ptr`
+// * 9027   If node connection error occurred - The error ID is written to `id_ptr`
+//
+// Traps:
+// * If the name or function string is not a valid utf8 string.
+// * If the params array is in a wrong format.
+// * If any memory outside the guest heap space is referenced.
+#[allow(clippy::too_many_arguments)]
+fn get_or_spawn<T, E>(
+    mut caller: Caller<T>,
+    name_str_ptr: u32,
+    name_str_len: u32,
+    node_id: u64,
+    config_id: i64,
+    module_id: u64,
+    func_str_ptr: u32,
+    func_str_len: u32,
+    params_ptr: u32,
+    params_len: u32,
+    node_id_ptr: u32,
+    id_ptr: u32,
+) -> Box<dyn Future<Output = Result<u32>> + Send + '_>
+where
+    T: DistributedCtx<E> + ResourceLimiter + Send + ErrorCtx + 'static,
+    E: Environment,
+    for<'a> &'a T: Send,
+{
+    Box::new(async move {
+        let memory = get_memory(&mut caller)?;
+        let name = memory
+            .data(&caller)
+            .get(name_str_ptr as usize..(name_str_ptr + name_str_len) as usize)
+            .or_trap("lunatic::distributed::get_or_spawn::name_str")?;
+        let name = std::str::from_utf8(name)
+            .or_trap("lunatic::distributed::get_or_spawn::name_str_utf8")?
+            .to_owned();
+
+        // Reserve the name while spawning, other spawns under it wait for this one.
+        let registry = caller.data().registry().clone();
+        let (node_id, process_or_error_id, ret) = match registry.reserve(&name).await {
+            Err((node_id, process_id)) => (node_id, process_id, 2),
+            Ok(reservation) => {
+                let spawned = spawn_on_node(
+                    &mut caller,
+                    node_id,
+                    config_id,
+                    module_id,
+                    (func_str_ptr, func_str_len),
+                    (params_ptr, params_len),
+                )
+                .await?;
+                match spawned {
+                    Ok(process_id) => {
+                        reservation.register(node_id, process_id);
+                        (node_id, process_id, 0)
+                    }
+                    // Dropping the reservation releases the name.
+                    Err(error) => {
+                        let (error_id, ret) = spawn_error(caller.data_mut(), error, 3)?;
+                        (node_id, error_id, ret)
+                    }
+                }
+            }
+        };
+
+        memory
+            .write(&mut caller, node_id_ptr as usize, &node_id.to_le_bytes())
+            .or_trap("lunatic::distributed::get_or_spawn::write_node_id")?;
+        memory
+            .write(
+                &mut caller,
+                id_ptr as usize,
+                &process_or_error_id.to_le_bytes(),
+            )
+            .or_trap("lunatic::distributed::get_or_spawn::write_id")?;
+
+        Ok(ret)
+    })
+}
+
+// Spawns the function `func_str` of module `module_id` with `params` on node `node_id`, and
+// returns the new process' ID.
+async fn spawn_on_node<T, E>(
+    caller: &mut Caller<'_, T>,
+    node_id: u64,
+    config_id: i64,
+    module_id: u64,
+    (func_str_ptr, func_str_len): (u32, u32),
+    (params_ptr, params_len): (u32, u32),
+) -> Result<Result<u64, ClientError>>
+where
+    T: DistributedCtx<E> + ResourceLimiter + Send + ErrorCtx + 'static,
+    E: Environment,
+    for<'a> &'a T: Send,
+{
+    if !caller.data().can_spawn() {
+        return Err(anyhow!(
+            "Process doesn't have permissions to spawn sub-processes"
+        ));
+    }
+    let memory = get_memory(caller)?;
+    let func_str = memory
+        .data(&caller)
+        .get(func_str_ptr as usize..(func_str_ptr + func_str_len) as usize)
+        .or_trap("lunatic::distributed::spawn::func_str")?;
+
+    let function =
+        std::str::from_utf8(func_str).or_trap("lunatic::distributed::spawn::func_str_utf8")?;
+
+    let params = memory
+        .data(&caller)
+        .get(params_ptr as usize..(params_ptr + params_len) as usize)
+        .or_trap("lunatic::distributed::spawn::params")?;
+    let params = params
+        .as_chunks::<17>()
+        .0
+        .iter()
+        .map(|chunk| {
+            let value = u128::from_le_bytes(chunk[1..].try_into()?);
+            let result = match chunk[0] {
+                0x7F => Val::I32(value as i32),
+                0x7E => Val::I64(value as i64),
+                0x7B => Val::V128(value),
+                _ => return Err(anyhow!("Unsupported type ID")),
+            };
+            Ok(result)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let state = caller.data();
+
+    let config = match config_id {
+        -1 => state.config().clone(),
+        config_id => Arc::new(
+            state
+                .config_resources()
+                .get(config_id as u64)
+                .or_trap("lunatic::distributed::spawn: Config ID doesn't exist")?
+                .clone(),
+        ),
+    };
+    let config: Vec<u8> =
+        rmp_serde::to_vec(config.as_ref()).map_err(|_| anyhow!("Error serializing config"))?;
+
+    log::debug!("Spawn on node {node_id}, mod {module_id}, fn {function}, params {params:?}");
+
+    let self_node_id = state.distributed()?.node_id();
+    let spawn_params = SpawnParams {
+        env: EnvironmentId(state.environment_id()),
+        src: ProcessId(state.id()),
+        node: NodeId(node_id),
+        spawn: Spawn {
+            response_node_id: self_node_id,
+            environment_id: state.environment_id(),
+            function: function.to_string(),
+            module_id,
+            params,
+            config,
+        },
+    };
+    let node_client = state.distributed()?.node_client.clone();
+    let spawn_response = node_client
+        .spawn(spawn_params)
+        .await
+        .map(|message_id| node_client.await_response(message_id))?
+        .await?;
+    match spawn_response {
+        distributed::message::ResponseContent::Spawned(process_id) => Ok(Ok(process_id)),
+        distributed::message::ResponseContent::Error(error) => Ok(Err(error)),
+        _ => Err(anyhow!("unreachable")),
+    }
+}
+
+// Stores the error of a spawn, and returns its ID and the code to return for it. Spawns that
+// return 2 for something else use `module_not_found` for a missing module.
+fn spawn_error<T: ErrorCtx>(
+    state: &mut T,
+    error: ClientError,
+    module_not_found: u32,
+) -> Result<(u64, u32)> {
+    let (code, message): (u32, String) = match error {
+        ClientError::Unexpected(cause) => Err(anyhow!(cause)),
+        ClientError::Connection(cause) => Ok((9027, cause)),
+        ClientError::NodeNotFound => Ok((1, "Node does not exist.".to_string())),
+        ClientError::ModuleNotFound => Ok((module_not_found, "Module does not exist.".to_string())),
+        ClientError::ProcessNotFound => Err(anyhow!("unreachable")),
+    }?;
+    Ok((state.error_resources_mut().add(anyhow!(message)), code))
 }
 
 // Sends the message in scratch area to a process running on a node with id `node_id`.

@@ -42,7 +42,8 @@ pub fn register<T: ProcessState + ProcessCtx<T> + Send + Sync + 'static>(
     Ok(())
 }
 
-// Registers process with ID under `name`.
+// Registers process with ID under `name`. If a process is being spawned under `name` with
+// `get_or_spawn`, waits until it's spawned, and then replaces it.
 //
 // Traps:
 // * If the process ID doesn't exist.
@@ -62,11 +63,7 @@ fn put<T: ProcessState + ProcessCtx<T> + Send + Sync>(
             .or_trap("lunatic::registry::put")?;
         let name = std::str::from_utf8(name).or_trap("lunatic::registry::put")?;
 
-        state
-            .registry()
-            .write()
-            .await
-            .insert(name.to_owned(), (node_id, process_id));
+        state.registry().put(name, node_id, process_id).await;
 
         #[cfg(feature = "metrics")]
         metrics::counter!("lunatic.registry.write").increment(1);
@@ -78,7 +75,8 @@ fn put<T: ProcessState + ProcessCtx<T> + Send + Sync>(
     })
 }
 
-// Looks up process under `name` and returns 0 if it was found or 1 if not found.
+// Looks up process under `name` and returns 0 if it was found or 1 if not found. A process
+// that's being spawned under `name` with `get_or_spawn` isn't found until it's spawned.
 //
 // Traps:
 // * If any memory outside the guest heap space is referenced.
@@ -100,9 +98,7 @@ fn get<T: ProcessState + ProcessCtx<T> + Send + Sync>(
         #[cfg(feature = "metrics")]
         metrics::counter!("lunatic.registry.read").increment(1);
 
-        let (node_id, process_id) = if let Some(process) = state.registry().read().await.get(name) {
-            *process
-        } else {
+        let Some((node_id, process_id)) = state.registry().get(name) else {
             return Ok(1);
         };
 
@@ -121,7 +117,8 @@ fn get<T: ProcessState + ProcessCtx<T> + Send + Sync>(
     })
 }
 
-// Removes process under `name` if it exists.
+// Removes process under `name` if it exists. If a process is being spawned under `name` with
+// `get_or_spawn`, waits until it's spawned, and then removes it.
 //
 // Traps:
 // * If any memory outside the guest heap space is referenced.
@@ -138,7 +135,7 @@ fn remove<T: ProcessState + ProcessCtx<T> + Send + Sync>(
             .or_trap("lunatic::registry::get")?;
         let name = std::str::from_utf8(name).or_trap("lunatic::registry::get")?;
 
-        state.registry().write().await.remove(name);
+        state.registry().remove(name).await;
 
         #[cfg(feature = "metrics")]
         metrics::counter!("lunatic.registry.deletion").increment(1);

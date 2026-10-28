@@ -1,15 +1,15 @@
 //! The guest SDK (lunatic-rs) is compiled against these host functions, so their names and
 //! signatures must not change by accident (e.g. through a wasmtime or wasmtime-wasi upgrade).
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use lunatic_process::{
     env::LunaticEnvironment,
+    registry::Registry,
     runtimes::wasmtime::{default_config, WasmtimeRuntime},
     state::ProcessState,
 };
 use lunatic_runtime::{DefaultProcessConfig, DefaultProcessState};
-use tokio::sync::RwLock;
 use wasmtime::{Engine, Extern, Linker, Store};
 
 #[tokio::test]
@@ -25,7 +25,7 @@ async fn host_functions_match_snapshot() {
         runtime,
         module,
         Arc::new(DefaultProcessConfig::default()),
-        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(Registry::default()),
     )
     .unwrap();
 
