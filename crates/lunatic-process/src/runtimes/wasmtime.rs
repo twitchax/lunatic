@@ -146,7 +146,8 @@ where
                     // If the trap is a result of calling `proc_exit(0)`, treat it as an no-error finish.
                     match err.downcast_ref::<wasmtime_wasi::I32Exit>() {
                         Some(wasmtime_wasi::I32Exit(0)) => ResultValue::Ok,
-                        _ => ResultValue::Failed(err.to_string()),
+                        // `Debug` keeps the cause (e.g. which trap); `Display` is only the outermost context (the backtrace).
+                        _ => ResultValue::Failed(format!("{err:?}")),
                     }
                 }
             },
