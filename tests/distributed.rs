@@ -69,31 +69,44 @@ fn forward_lines(output: impl Read + Send + 'static, name: &'static str, lines: 
 // The output of all `lunatic` processes of a test.
 struct Output {
     lines: Receiver<Line>,
-    seen: Vec<String>,
+    seen: Vec<Line>,
     deadline: Instant,
 }
 
 impl Output {
-    // Waits for an output line of `name` that contains `pattern`, and returns it.
+    // Waits for an output line of `name` that contains `pattern`, and returns it. The line may
+    // have been printed while waiting for another one.
     fn wait_for(&mut self, name: &str, pattern: &str) -> String {
+        let printed = |(line_name, line): &Line| *line_name == name && line.contains(pattern);
+        if let Some((_, line)) = self.seen.iter().find(|line| printed(line)) {
+            return line.clone();
+        }
         loop {
             let timeout = self.deadline.saturating_duration_since(Instant::now());
-            let Ok((line_name, line)) = self.lines.recv_timeout(timeout) else {
+            let Ok(line) = self.lines.recv_timeout(timeout) else {
                 panic!(
                     "Timed out waiting for {} to print {:?}:\n{}",
                     name,
                     pattern,
-                    self.seen.join("\n")
+                    self.dump()
                 );
             };
-            self.seen.push(format!("[{line_name}] {line}"));
-            if FAILURES.iter().any(|failure| line.contains(failure)) {
-                panic!("{} failed:\n{}", line_name, self.seen.join("\n"));
+            self.seen.push(line.clone());
+            if FAILURES.iter().any(|failure| line.1.contains(failure)) {
+                panic!("{} failed:\n{}", line.0, self.dump());
             }
-            if line_name == name && line.contains(pattern) {
-                return line;
+            if printed(&line) {
+                return line.1;
             }
         }
+    }
+
+    fn dump(&self) -> String {
+        self.seen
+            .iter()
+            .map(|(name, line)| format!("[{name}] {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -223,4 +236,37 @@ fn crashed_nodes_leave_the_cluster() {
 #[test]
 fn concurrent_named_spawns_spawn_one_process() {
     run_guest("wat/named_spawn.wat", "named spawn ok");
+}
+
+// A node that was unresponsive for longer than its lease is dropped from the cluster for good:
+// once it resumes, the control rejects it, and it exits with an error.
+#[test]
+fn nodes_dropped_from_the_cluster_exit() {
+    let mut cluster = Cluster::start("wat/node_down.wat");
+    cluster.output.wait_for("node B", "monitoring");
+
+    signal(&cluster.node_a, "-STOP");
+    cluster.output.wait_for("node B", "left the cluster");
+    signal(&cluster.node_a, "-CONT");
+
+    cluster
+        .output
+        .wait_for("node A", "dropped this node from the cluster");
+    let deadline = Instant::now() + TIMEOUT;
+    let status = loop {
+        if let Some(status) = cluster.node_a.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "node A didn't exit");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(!status.success(), "node A exited with {}", status);
+}
+
+fn signal(lunatic: &Lunatic, signal: &str) {
+    let status = Command::new("kill")
+        .args([signal, &lunatic.0.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
