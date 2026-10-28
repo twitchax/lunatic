@@ -1,0 +1,13 @@
+# Holding a DashMap guard across an `.await` blocks every other access to its shard until the task
+# resumes, which can deadlock the runtime (`clippy::await_holding_invalid_type`).
+await-holding-invalid-types = [
+    "dashmap::iter::Iter",
+    "dashmap::iter::IterMut",
+    "dashmap::mapref::entry::Entry",
+    "dashmap::mapref::entry::OccupiedEntry",
+    "dashmap::mapref::entry::VacantEntry",
+    "dashmap::mapref::multiple::RefMulti",
+    "dashmap::mapref::multiple::RefMutMulti",
+    "dashmap::mapref::one::Ref",
+    "dashmap::mapref::one::RefMut",
+]
