@@ -48,7 +48,11 @@ use anyhow::Result;
 use dashmap::DashMap;
 use lunatic_control::NodeInfo;
 use tokio::sync::{
-    mpsc::{self, error::TryRecvError, Receiver, Sender},
+    mpsc::{
+        self,
+        error::{TryRecvError, TrySendError},
+        Receiver, Sender,
+    },
     Notify, RwLock,
 };
 
@@ -142,6 +146,8 @@ async fn forward_messages(
                                 .store(chunk_id + 1, atomic::Ordering::Relaxed);
                             finished
                         }
+                        // The connection manager is behind, retry the chunk on the next pass.
+                        Err(TrySendError::Full(_)) => false,
                         Err(e) => {
                             log::warn!(
                                 "Cannot send next chunk from pid={} to node={} dest_pid={}, reason: {e}",
@@ -149,7 +155,8 @@ async fn forward_messages(
                                 msg_ctx.node.0,
                                 msg_ctx.dest.0,
                             );
-                            finished
+                            // Without a connection manager the message can't be sent anymore.
+                            true
                         }
                     }
                 } else {
@@ -363,8 +370,13 @@ mod tests {
     impl Queues {
         // Starts forwarding messages to a node, returning the chunks it receives.
         fn start() -> (Arc<Self>, Receiver<MessageChunk>) {
+            Self::start_with_node_queue(100)
+        }
+
+        // Starts forwarding messages to a node whose queue holds up to `capacity` chunks.
+        fn start_with_node_queue(capacity: usize) -> (Arc<Self>, Receiver<MessageChunk>) {
             let queues = Arc::new(Self::default());
-            let (sender, chunks) = mpsc::channel(100);
+            let (sender, chunks) = mpsc::channel(capacity);
             queues.nodes_queues.insert(NODE, sender);
             let forwarding = queues.clone();
             tokio::spawn(async move {
@@ -453,5 +465,23 @@ mod tests {
 
         queues.send(&queue, 0, 0, 2).await;
         assert_eq!(next_chunk(&mut chunks).await.message_id, 2);
+    }
+
+    #[tokio::test]
+    async fn messages_wait_for_a_full_node_queue() {
+        let (queues, mut chunks) = Queues::start_with_node_queue(1);
+        let queue_senders = [queues.queue(0, 1), queues.queue(0, 2)];
+        // Both messages are forwarded before the node queue is read, which only fits one.
+        for (pid, queue) in (1..).zip(&queue_senders) {
+            queues.send(queue, 0, pid, pid).await;
+        }
+        tokio::task::yield_now().await;
+
+        let mut message_ids = vec![
+            next_chunk(&mut chunks).await.message_id,
+            next_chunk(&mut chunks).await.message_id,
+        ];
+        message_ids.sort();
+        assert_eq!(message_ids, vec![1, 2]);
     }
 }
