@@ -32,6 +32,11 @@ where
     linker.func_wrap("lunatic::distributed", "nodes_count", nodes_count)?;
     linker.func_wrap_anyhow("lunatic::distributed", "get_nodes", get_nodes)?;
     linker.func_wrap("lunatic::distributed", "node_id", node_id)?;
+    linker.func_wrap_anyhow(
+        "lunatic::distributed",
+        "get_message_node_id",
+        get_message_node_id,
+    )?;
     linker.func_wrap("lunatic::distributed", "module_id", module_id)?;
     linker.func_wrap_anyhow("lunatic::distributed", "monitor", monitor)?;
     linker.func_wrap_anyhow("lunatic::distributed", "stop_monitoring", stop_monitoring)?;
@@ -844,12 +849,37 @@ where
     T: DistributedCtx<E>,
     E: Environment,
 {
-    caller
-        .data()
-        .distributed()
-        .as_ref()
-        .map(|d| d.node_id())
-        .unwrap_or(0)
+    this_node_id(caller.data())
+}
+
+// The ID of this node, 0 outside a cluster.
+fn this_node_id<T, E>(state: &T) -> u64
+where
+    T: DistributedCtx<E>,
+    E: Environment,
+{
+    state.distributed().map(|d| d.node_id()).unwrap_or(0)
+}
+
+// Returns the ID of the node of the process that the `ProcessDied` message in the scratch area is
+// about. That's this node's ID for a process on this node, which is 0 outside a cluster.
+//
+// Traps:
+// * If there's no `ProcessDied` message in the scratch area.
+fn get_message_node_id<T, E>(mut caller: Caller<T>) -> Result<u64>
+where
+    T: DistributedCtx<E> + ProcessCtx<T>,
+    E: Environment,
+{
+    let node_id = match caller.data_mut().message_scratch_area() {
+        Some(Message::ProcessDied { node_id, .. }) => *node_id,
+        _ => {
+            return Err(anyhow!(
+                "lunatic::distributed::get_message_node_id: no `ProcessDied` message in the scratch area"
+            ))
+        }
+    };
+    Ok(node_id.unwrap_or_else(|| this_node_id(caller.data())))
 }
 
 // Returns id of the module that the current process is spawned from

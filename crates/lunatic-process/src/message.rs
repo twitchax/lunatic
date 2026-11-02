@@ -29,7 +29,12 @@ pub type Resource = dyn Any + Send + Sync;
 pub enum Message {
     Data(DataMessage),
     LinkDied(Option<i64>),
-    ProcessDied(u64),
+    /// A `ProcessDied` signal that was turned into a message. `node_id` is `None` when the process
+    /// was on this node.
+    ProcessDied {
+        node_id: Option<u64>,
+        process_id: u64,
+    },
 }
 
 impl Message {
@@ -37,7 +42,7 @@ impl Message {
         match self {
             Message::Data(message) => message.tag,
             Message::LinkDied(tag) => *tag,
-            Message::ProcessDied(_) => None,
+            Message::ProcessDied { .. } => None,
         }
     }
 
@@ -45,7 +50,7 @@ impl Message {
         match self {
             Message::Data(_) => None,
             Message::LinkDied(_) => None,
-            Message::ProcessDied(process_id) => Some(*process_id),
+            Message::ProcessDied { process_id, .. } => Some(*process_id),
         }
     }
 
@@ -56,7 +61,7 @@ impl Message {
             Message::LinkDied(_) => {
                 metrics::counter!("lunatic.process.messages.link_died.count").increment(1);
             }
-            Message::ProcessDied(_) => {}
+            Message::ProcessDied { .. } => {}
         }
     }
 }

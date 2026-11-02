@@ -130,13 +130,17 @@ fn signal_recorder(id: u64) -> (Arc<dyn Process>, UnboundedReceiver<Signal>) {
     (Arc::new(SignalRecorder { id, signals }), recorded)
 }
 
-async fn process_died(signals: &mut UnboundedReceiver<Signal>) -> u64 {
+// The node and process that a `ProcessDied` signal names.
+async fn process_died(signals: &mut UnboundedReceiver<Signal>) -> (Option<u64>, u64) {
     let signal = tokio::time::timeout(Duration::from_secs(5), signals.recv())
         .await
         .expect("the monitor didn't fire")
         .unwrap();
     match signal {
-        Signal::ProcessDied(process_id) => process_id,
+        Signal::ProcessDied {
+            node_id,
+            process_id,
+        } => (node_id, process_id),
         signal => panic!("unexpected signal {signal:?}"),
     }
 }
@@ -165,7 +169,10 @@ async fn remote_monitors_fire_when_their_node_goes_down() {
     node_client.remove_process_resources(EnvironmentId(1), ProcessId(3));
 
     leaving.notify_node_stopped().await.unwrap();
-    assert_eq!(process_died(&mut signals).await, 7);
+    assert_eq!(
+        process_died(&mut signals).await,
+        (Some(leaving.node_id()), 7)
+    );
     // A notice of the process' death that comes late doesn't fire the monitor again.
     node_client.remote_process_died(monitor(1, 7));
     assert!(signals.try_recv().is_err());
@@ -176,7 +183,10 @@ async fn remote_monitors_fire_when_their_node_goes_down() {
     // Monitoring a process on a node that's down fires right away.
     let (late, mut late_signals) = signal_recorder(4);
     node_client.monitor(monitor(4, 8), late);
-    assert_eq!(process_died(&mut late_signals).await, 8);
+    assert_eq!(
+        process_died(&mut late_signals).await,
+        (Some(leaving.node_id()), 8)
+    );
 }
 
 #[tokio::test]
@@ -202,7 +212,10 @@ async fn monitored_processes_notify_their_remote_monitors_once() {
     );
     // The monitored process dies, possibly noticed twice. The first notice removes the
     // stand-in, so stopping the monitor afterwards has nothing to stop.
-    proxy.send(Signal::ProcessDied(7));
+    proxy.send(Signal::ProcessDied {
+        node_id: None,
+        process_id: 7,
+    });
     node_client.monitored_process_died(monitor);
     node_client.remove_monitor_proxy(monitor);
     assert!(monitored_signals.try_recv().is_err());

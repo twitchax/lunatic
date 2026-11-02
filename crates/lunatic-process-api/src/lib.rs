@@ -1020,7 +1020,12 @@ fn monitor<T: ProcessState + ProcessCtx<T>>(caller: Caller<T>, process_id: u64) 
     if !monitored {
         // A local process sends its messages before it leaves its environment, so they're in
         // this process' signal mailbox already, ahead of the notice.
-        signal_mailbox.send(Signal::ProcessDied(process_id)).ok();
+        signal_mailbox
+            .send(Signal::ProcessDied {
+                node_id: None,
+                process_id,
+            })
+            .ok();
     }
 
     Ok(())

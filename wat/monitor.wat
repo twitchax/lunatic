@@ -1,7 +1,9 @@
 ;; Run with `lunatic node --wasm`: monitors processes on another node. Prints "monitor ok" once
 ;; - the monitor of a process fired after the 100 messages the process sent before exiting,
 ;; - the monitor of a process that already finished fired,
-;; - and the monitor of a process that never existed fired,
+;; - the monitor of a process that never existed fired,
+;; - and each notice named the process and its node, also for a local process with the same ID as
+;;   a remote one,
 ;; and "monitor failed" otherwise.
 (module
     (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
@@ -13,10 +15,13 @@
         (func $spawn (param i64 i64 i64 i32 i32 i32 i32 i32) (result i32)))
     (import "lunatic::distributed" "send" (func $send (param i64 i64) (result i32)))
     (import "lunatic::distributed" "monitor" (func $monitor (param i64 i64)))
+    (import "lunatic::distributed" "get_message_node_id" (func $message_node_id (result i64)))
+    (import "lunatic::process" "monitor" (func $monitor_local (param i64)))
     (import "lunatic::process" "process_id" (func $process_id (result i64)))
     (import "lunatic::process" "sleep_ms" (func $sleep_ms (param i64)))
     (import "lunatic::message" "create_data" (func $create_data (param i64 i64)))
     (import "lunatic::message" "receive" (func $receive (param i32 i32 i64) (result i32)))
+    (import "lunatic::message" "get_process_id" (func $message_process_id (result i64)))
 
     (memory (export "memory") 1)
     ;; 0..12: fd_write's iovec and written length.
@@ -53,6 +58,11 @@
     (func $next (result i32)
         (call $receive (i32.const 0) (i32.const 0) (i64.const 10000)))
 
+    ;; Fails unless the `ProcessDied` message received last names `process` on `node`.
+    (func $expect_died (param $node i64) (param $process i64)
+        (if (i64.ne (call $message_node_id) (local.get $node)) (then (call $fail)))
+        (if (i64.ne (call $message_process_id) (local.get $process)) (then (call $fail))))
+
     (func (export "_start")
         (local $count i32)
         (local $i i32)
@@ -85,6 +95,7 @@
                 (local.set $count (i32.add (local.get $count) (i32.const 1)))
                 (br $messages)))
         (if (i32.ne (local.get $count) (i32.const 100)) (then (call $fail)))
+        (call $expect_died (local.get $other) (local.get $process))
 
         ;; The monitor of a process that already finished fires.
         (local.set $process (call $spawn_on (local.get $other) (i32.const 24)))
@@ -96,6 +107,12 @@
         ;; The monitor of a process that never existed fires.
         (call $monitor (local.get $other) (i64.const 1000000))
         (if (i32.ne (call $next) (i32.const 2)) (then (call $fail)))
+        (call $expect_died (local.get $other) (i64.const 1000000))
+
+        ;; So does the monitor of a process with the same ID that never existed on this node.
+        (call $monitor_local (i64.const 1000000))
+        (if (i32.ne (call $next) (i32.const 2)) (then (call $fail)))
+        (call $expect_died (call $node_id) (i64.const 1000000))
 
         (call $print (i32.const 32) (i32.const 11)))
 

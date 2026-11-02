@@ -429,7 +429,10 @@ impl Client {
                     .then(|| monitors.monitoring_process.clone())
             });
         if let Some(monitoring_process) = monitoring_process {
-            monitoring_process.send(Signal::ProcessDied(monitor.process.0));
+            monitoring_process.send(Signal::ProcessDied {
+                node_id: Some(monitor.node.0),
+                process_id: monitor.process.0,
+            });
         }
     }
 
@@ -678,7 +681,7 @@ impl Process for MonitorProxy {
 
     fn send(&self, signal: Signal) {
         // Monitored processes only send their monitors `Signal::ProcessDied`.
-        if let Signal::ProcessDied(_) = signal {
+        if let Signal::ProcessDied { .. } = signal {
             self.client.monitored_process_died(self.monitor);
         }
     }
@@ -709,7 +712,10 @@ impl Inner {
             });
         }
         for (monitoring_process, process) in died {
-            monitoring_process.send(Signal::ProcessDied(process.0));
+            monitoring_process.send(Signal::ProcessDied {
+                node_id: Some(node.0),
+                process_id: process.0,
+            });
         }
         // The node's processes don't monitor local ones anymore.
         let mut proxies = Vec::new();

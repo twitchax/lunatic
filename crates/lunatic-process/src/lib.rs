@@ -133,15 +133,24 @@ pub enum Signal {
     // to the sender in form of a `LinkDied` signal.
     Link(Option<i64>, Arc<dyn Process>),
     // Request from a process to be unlinked
-    UnLink { process_id: u64 },
+    UnLink {
+        process_id: u64,
+    },
     // Sent to linked processes when the link dies. Contains the tag used when the link was
     // established. Depending on the value of `die_when_link_dies` (default is `true`) and
     // the death reason, the receiving process will turn this signal into a message or the
     // process will immediately die as well.
     LinkDied(u64, Option<i64>, DeathReason),
     Monitor(Arc<dyn Process>),
-    StopMonitoring { process_id: u64 },
-    ProcessDied(u64),
+    StopMonitoring {
+        process_id: u64,
+    },
+    // Sent to the processes monitoring a process when it dies. `node_id` is `None` when the process
+    // was on this node.
+    ProcessDied {
+        node_id: Option<u64>,
+        process_id: u64,
+    },
 }
 
 impl Debug for Signal {
@@ -155,7 +164,7 @@ impl Debug for Signal {
             Self::LinkDied(_, _, reason) => write!(f, "LinkDied {reason:?}"),
             Self::Monitor(p) => write!(f, "Monitor {}", p.id()),
             Self::StopMonitoring { process_id } => write!(f, "UnMonitor {process_id}"),
-            Self::ProcessDied(_) => write!(f, "ProcessDied"),
+            Self::ProcessDied { .. } => write!(f, "ProcessDied"),
         }
     }
 }
@@ -385,8 +394,8 @@ where
                         monitors.remove(&process_id);
                     }
                     // Notify process that a monitored process died
-                    Ok(Signal::ProcessDied(id)) => {
-                        message_mailbox.push(Message::ProcessDied(id));
+                    Ok(Signal::ProcessDied { node_id, process_id }) => {
+                        message_mailbox.push(Message::ProcessDied { node_id, process_id });
                     }
                     Err(_) => {
                         debug_assert!(has_sender);
@@ -454,7 +463,10 @@ where
 
     // Notify all monitoring processes we died
     for proc in monitors.values() {
-        proc.send(Signal::ProcessDied(id));
+        proc.send(Signal::ProcessDied {
+            node_id: None,
+            process_id: id,
+        });
     }
 
     result
