@@ -609,7 +609,11 @@ fn spawn_error<T: ErrorCtx>(
 ) -> Result<(u64, u32)> {
     let (code, message): (u32, String) = match error {
         ClientError::Unexpected(cause) => Err(anyhow!(cause)),
-        ClientError::Connection(cause) => Ok((9027, cause)),
+        // The node may have gone down after it got the spawn request.
+        ClientError::Connection(cause) => Ok((
+            9027,
+            format!("{cause}; the process may or may not have started"),
+        )),
         ClientError::NodeNotFound => Ok((1, "Node does not exist.".to_string())),
         ClientError::ModuleNotFound => Ok((module_not_found, "Module does not exist.".to_string())),
         ClientError::ProcessNotFound => Err(anyhow!("unreachable")),
@@ -889,4 +893,42 @@ where
     E: Environment,
 {
     caller.data().module_id()
+}
+
+#[cfg(test)]
+mod tests {
+    use lunatic_error_api::{ErrorCtx, ErrorResource};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Errors(ErrorResource);
+
+    impl ErrorCtx for Errors {
+        fn error_resources(&self) -> &ErrorResource {
+            &self.0
+        }
+
+        fn error_resources_mut(&mut self) -> &mut ErrorResource {
+            &mut self.0
+        }
+    }
+
+    #[test]
+    fn a_spawn_that_lost_its_node_may_have_started() {
+        let mut errors = Errors::default();
+
+        let (id, code) = spawn_error(
+            &mut errors,
+            ClientError::Connection("Node 7 is down".to_string()),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(code, 9027);
+        assert_eq!(
+            errors.0.get(id).unwrap().to_string(),
+            "Node 7 is down; the process may or may not have started"
+        );
+    }
 }
