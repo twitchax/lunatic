@@ -4,9 +4,15 @@ on:
   push:
     paths:
       - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/cargo-deny-pr.yml'
   pull_request:
     paths:
       - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/cargo-deny-pr.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,8 +28,8 @@ jobs:
           - bans licenses sources
 
     steps:
-    - uses: actions/checkout@v3
-    - uses: EmbarkStudios/cargo-deny-action@v1
+    - uses: actions/checkout@v4
+    - uses: EmbarkStudios/cargo-deny-action@v2
       with:
         command: check ${{ matrix.checks }}
 
