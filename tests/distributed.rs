@@ -239,7 +239,9 @@ fn concurrent_named_spawns_spawn_one_process() {
 }
 
 // A node that was unresponsive for longer than its lease is dropped from the cluster for good:
-// once it resumes, the control rejects it, and it exits with an error.
+// once it resumes, the control rejects it, and it exits with an error. Unix only: the node is made
+// unresponsive with SIGSTOP.
+#[cfg(unix)]
 #[test]
 fn nodes_dropped_from_the_cluster_exit() {
     let mut cluster = Cluster::start("wat/node_down.wat");
@@ -263,6 +265,7 @@ fn nodes_dropped_from_the_cluster_exit() {
     assert!(!status.success(), "node A exited with {}", status);
 }
 
+#[cfg(unix)]
 fn signal(lunatic: &Lunatic, signal: &str) {
     let status = Command::new("kill")
         .args([signal, &lunatic.0.id().to_string()])
