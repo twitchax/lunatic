@@ -20,7 +20,7 @@ jobs:
             target_name: lunatic
             asset_name: lunatic-linux-amd64.tar.gz
             content_type: application/gzip
-          - os: macos-11
+          - os: macos-latest
             target_name: lunatic
             asset_name: lunatic-macos-universal.tar.gz
             content_type: application/gzip
@@ -38,12 +38,13 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt, clippy
-      - name: Install latest Rust with an additional AArch64 target on macOS
+      # macOS runners are Apple Silicon, so the universal binary needs the x86_64 target too.
+      - name: Install latest Rust with an additional x86_64 target on macOS
         if: runner.os == 'macOS'
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          target: aarch64-apple-darwin
+          target: x86_64-apple-darwin
           override: true
           components: rustfmt, clippy
       # Rust builds can take some time, cache them.

@@ -4,6 +4,8 @@ on:
     types: published
 jobs:
   update-version:
+    # The tap belongs to upstream; forks have no token for it.
+    if: github.repository == 'lunatic-solutions/lunatic'
     runs-on: ubuntu-latest
     steps:
       - name: "Update version"
