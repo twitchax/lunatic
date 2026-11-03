@@ -1,6 +1,6 @@
 [package]
 name = "lunatic-control-axum"
-version = "0.13.3"
+version = "0.15.0"
 edition = "2021"
 description = "TBD"
 homepage = "https://lunatic.solutions"

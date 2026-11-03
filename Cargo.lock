@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "hash-map-id"
-version = "0.13.2"
+version = "0.15.0"
 
 [[package]]
 name = "hashbag"
@@ -2044,7 +2044,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "lunatic-common-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "wasmtime",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-control"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "serde",
  "uuid",
@@ -2060,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-control-axum"
-version = "0.13.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "asn1-rs",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-distributed"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async_cell",
@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-distributed-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "asn1-rs",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-error-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "hash-map-id",
@@ -2139,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-messaging-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "lunatic-common-api",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-metrics-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "log",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-networking-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "hash-map-id",
@@ -2178,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-process"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2196,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-process-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "hash-map-id",
@@ -2212,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-registry-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "lunatic-common-api",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-runtime"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-ctrlc",
@@ -2275,7 +2275,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-sqlite-api"
-version = "0.13.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-stdout-capture"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "tokio",
@@ -2300,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-timer-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "hash-map-id",
@@ -2314,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-trap-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "lunatic-common-api",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-version-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "wasmtime",
@@ -2331,7 +2331,7 @@ dependencies = [
 
 [[package]]
 name = "lunatic-wasi-api"
-version = "0.13.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "log",

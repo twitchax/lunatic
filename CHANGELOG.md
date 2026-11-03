@@ -1,5 +1,30 @@
 # Lunatic Changelog
 
+## v0.15.0
+
+Released 2026-11-03.
+
+Guests need lunatic-rs 0.15 (published as `lunatic-twitchax-patch`), whose new host functions older runtimes don't
+have.
+
+### Changes
+
+- Builds on Rust 1.99, with wasmtime 50 and WASI preview 1 through `wasmtime-wasi`; guests target `wasm32-wasip1`
+- Dependencies upgraded across the board (quinn, rustls, axum, reqwest, metrics and the rest)
+- Processes can monitor processes on other nodes. A `ProcessDied` notice names the node the process was on, and
+  arrives after the dead process' messages
+- Named processes spawn on other nodes atomically, with the name reserved during the spawn
+- Nodes renew their lease with the control server every second. A node that leaves fails the requests sent to it,
+  sends `ProcessDied` for the processes monitored there, and closes its connections. A node fenced off from the
+  cluster exits
+- Spawning or sending to a node outside the cluster returns an error instead of trapping
+- Requests to processes that don't exist are reported, locally and across nodes
+- Links to processes that already finished, and monitors of processes that don't exist, report right away
+- `lunatic run` exits with an error when the main process fails, and logs the cause of a process failure
+- FIX: Deadlocks in distributed messaging (queue, response map and environment guards held across awaits)
+- FIX: Messages to busy or unconnected nodes are retried and backed off instead of dropped
+- FIX: wasmtime and zstd security advisories (RUSTSEC-2026-0391, 0398, 0403, 0420, 0422, 0423 and 0424)
+
 ## v0.13.0
 
 Released 2023-05-03.
