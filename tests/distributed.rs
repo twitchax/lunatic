@@ -190,7 +190,8 @@ fn run_guest(wat: &str, success: &str) {
     Cluster::start(wat).output.wait_for("node B", success);
 }
 
-// Spawns processes on the other node and exchanges messages with them (`wat/distributed.wat`).
+// Spawns processes on the other node and exchanges messages with them, after a spawn of a missing
+// module failed (`wat/distributed.wat`).
 #[test]
 fn nodes_spawn_processes_on_each_other() {
     run_guest("wat/distributed.wat", "distributed ok");

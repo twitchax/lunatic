@@ -1,7 +1,8 @@
 ;; Exercises node-to-node round trips: run with `lunatic node --wasm`, `_start` repeatedly spawns
 ;; `worker` on another node, messages it, and waits for its reply. Prints "distributed ok" once all
 ;; rounds completed and "distributed failed" if one of them didn't. The worker only replies once it
-;; received a message, so nothing else is in flight while the spawn response travels back.
+;; received a message, so nothing else is in flight while the spawn response travels back. First,
+;; a spawn of a module that doesn't exist fails with 2.
 (module
     (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
     (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
@@ -58,6 +59,12 @@
         ;; The workers message back to this process.
         (call $param (i32.const 128) (call $node_id))
         (call $param (i32.const 145) (call $process_id))
+
+        (if (i32.ne (i32.const 2)
+                (call $spawn (local.get $other) (i64.const -1) (i64.const 1000000)
+                    (i32.const 16) (i32.const 6) (i32.const 128) (i32.const 34) (i32.const 192)))
+            (then (call $fail)))
+
         (local.set $i (i32.const 0))
         (loop $round
             (if (call $spawn (local.get $other) (i64.const -1) (call $module_id)
